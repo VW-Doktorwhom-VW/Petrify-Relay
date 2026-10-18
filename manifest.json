@@ -11,8 +11,8 @@
         "version": "1.0.0.0",
         "changelog": "Self-contained initial production release.",
         "targetAbi": "10.10.0.0",
-        "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Jellyfin.Plugin.Petrify.dll",
-        "checksum": "da6b27632f995ac91abeadf45a305d21"
+        "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
+        "checksum": "abdebe421372af9699f066dc3c0be2c1"
       }
     ]
   }
