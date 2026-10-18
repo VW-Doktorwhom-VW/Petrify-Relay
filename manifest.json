@@ -1,0 +1,19 @@
+[
+  {
+    "guid": "a8c9038d-19df-4122-a9bd-831e3d09e8f4",
+    "name": "Petrify",
+    "description": "Auto-extracting network relay plugin.",
+    "overview": "Runs Node relay automatically inside Jellyfin.",
+    "owner": "gelicleo555-spec",
+    "category": "General",
+    "versions": [
+      {
+        "version": "1.0.0.0",
+        "changelog": "Self-contained initial production release.",
+        "targetAbi": "10.10.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Jellyfin.Plugin.Petrify.dll",
+        "checksum": "da6b27632f995ac91abeadf45a305d21"
+      }
+    ]
+  }
+]
