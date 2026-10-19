@@ -1,0 +1,48 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Petrify</title>
+</head>
+<body>
+    <div id="PetrifyConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
+        <div data-role="content">
+            <div class="content-primary">
+                <h2>Petrify relay</h2>
+                <p>The Petrify relay starts automatically with Jellyfin. Petrify apps find it on your network, or you can enter this server's address and port manually.</p>
+                <form id="PetrifyConfigForm">
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="ServerPort">Relay port</label>
+                        <input id="ServerPort" name="ServerPort" type="number" is="emby-input" min="1" max="65535" />
+                        <div class="fieldDescription">Default 8787. Restart Jellyfin after changing it.</div>
+                    </div>
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button"><span>Save</span></button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script type="text/javascript">
+            var PetrifyConfig = { pluginUniqueId: 'a8c9038d-19df-4122-a9bd-831e3d09e8f4' };
+            document.querySelector('#PetrifyConfigPage').addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(PetrifyConfig.pluginUniqueId).then(function (config) {
+                    document.querySelector('#ServerPort').value = config.ServerPort || '8787';
+                    Dashboard.hideLoadingMsg();
+                });
+            });
+            document.querySelector('#PetrifyConfigForm').addEventListener('submit', function (e) {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(PetrifyConfig.pluginUniqueId).then(function (config) {
+                    config.ServerPort = document.querySelector('#ServerPort').value || '8787';
+                    ApiClient.updatePluginConfiguration(PetrifyConfig.pluginUniqueId, config).then(function (result) {
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                    });
+                });
+                e.preventDefault();
+                return false;
+            });
+        </script>
+    </div>
+</body>
+</html>

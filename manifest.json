@@ -8,11 +8,11 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.0.2.0",
-        "changelog": "Force overwrite extracted server.mjs resource on startup.",
+        "version": "1.0.3.0",
+        "changelog": "Updated relay: party mode stop silences every device except the host, full library paging. Node shipped compressed, relay output drained, configurable port.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "a9a8f93537dc43b8b265bfc92576d493"
+        "checksum": "f35a6bb60023ba76f687313b43b1e9db"
       }
     ]
   }

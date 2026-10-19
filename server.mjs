@@ -545,6 +545,8 @@ function partyAction(body) {
   if (action === "stop") {
     party.on = false;
     party.playing = false;
+    // Only the device that started the party keeps playing; everyone else is silenced.
+    for (const id of devices.keys()) if (id !== party.host) stopDevice(id);
     return true;
   }
   if (action === "play" || action === "pause" || action === "toggle") {
