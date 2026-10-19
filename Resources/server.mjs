@@ -699,6 +699,54 @@ async function pull(url, token, deviceId, mode, range) {
   return upstream;
 }
 
+// When the relay runs on (or next to) the Jellyfin machine, talking to it over the public
+// URL hairpins through the router/proxy and costs seconds per request. Find a direct
+// address that answers with the same server Id and use it for proxied requests.
+const fastOrigins = new Map();
+
+async function jellyfinInfo(origin, ms) {
+  try {
+    const res = await fetch(`${origin}/System/Info/Public`, { signal: AbortSignal.timeout(ms) });
+    if (!res.ok) return null;
+    const info = await res.json();
+    return info && info.Id ? info : null;
+  } catch {
+    return null;
+  }
+}
+
+async function probeFastOrigin(origin) {
+  const remote = await jellyfinInfo(origin, 10000);
+  if (!remote) return null;
+  const candidates = new Set(
+    String(process.env.PETRIFY_LOCAL_JELLYFIN || "http://127.0.0.1:8096,http://localhost:8096")
+      .split(",")
+      .map((item) => item.trim().replace(/\/+$/, ""))
+      .filter(Boolean),
+  );
+  try {
+    if (remote.LocalAddress) candidates.add(new URL(remote.LocalAddress).origin);
+  } catch {
+    /* no usable LocalAddress */
+  }
+  candidates.delete(origin);
+  for (const candidate of candidates) {
+    const local = await jellyfinInfo(candidate, 1500);
+    if (local && local.Id === remote.Id) return candidate;
+  }
+  return null;
+}
+
+async function fastOrigin(root) {
+  const key = root.origin;
+  let entry = fastOrigins.get(key);
+  if (!entry || Date.now() - entry.at > 10 * 60 * 1000) {
+    entry = { at: Date.now(), pending: probeFastOrigin(key).catch(() => null) };
+    fastOrigins.set(key, entry);
+  }
+  return entry.pending;
+}
+
 async function proxyJellyfin(req, res, incoming) {
   const base = incoming.searchParams.get("base") || "";
   const device = incoming.searchParams.get("device") || "petrify";
@@ -728,6 +776,8 @@ async function proxyJellyfin(req, res, incoming) {
     res.end("Bad request");
     return;
   }
+  const direct = await fastOrigin(new URL(base));
+  if (direct) target = new URL(target.pathname + target.search, direct);
   if (token && path.startsWith("/Audio/") && !target.searchParams.has("UserId")) {
     const userId = await resolveUserId(target, token, device);
     if (userId) target.searchParams.set("UserId", userId);
