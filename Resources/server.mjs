@@ -26,6 +26,8 @@ const userByToken = new Map();
 let seq = 1;
 let activeId = "";
 let activeTrackId = "";
+// Sub-millisecond wall clock shared by party timing and /v1/time.
+const hrNow = () => performance.timeOrigin + performance.now();
 
 function savePlaybackState(deviceId, state) {
   playbackState.set(deviceId, { ...state, updatedAt: Date.now() });
@@ -451,7 +453,7 @@ const party = {
 };
 let partyTimer = null;
 
-function partyPosition(now = Date.now()) {
+function partyPosition(now = hrNow()) {
   if (!party.playing) return party.anchorPos;
   return Math.max(0, party.anchorPos + (now - party.anchorAt) / 1000);
 }
@@ -461,7 +463,7 @@ function partyTrack(id = party.trackId) {
 }
 
 function partyPublic() {
-  return { ...party, serverNow: Date.now() };
+  return { ...party, serverNow: hrNow() };
 }
 
 function partyBroadcast() {
@@ -478,14 +480,14 @@ function partyGo(index, lead = 1200) {
     else {
       party.playing = false;
       party.anchorPos = 0;
-      party.anchorAt = Date.now();
+      party.anchorAt = hrNow();
       return;
     }
   }
   party.index = Math.max(0, index);
   party.trackId = ids[party.index];
   party.anchorPos = 0;
-  party.anchorAt = Date.now() + lead;
+  party.anchorAt = hrNow() + lead;
   party.playing = true;
 }
 
@@ -495,12 +497,12 @@ function schedulePartyAdvance() {
   if (!party.on || !party.playing) return;
   const secs = Number(partyTrack()?.secs || 0);
   if (!(secs > 1)) return;
-  const left = (secs - partyPosition()) * 1000 + Math.max(0, party.anchorAt - Date.now());
+  const left = (secs - partyPosition()) * 1000 + Math.max(0, party.anchorAt - hrNow());
   partyTimer = setTimeout(() => {
     if (!party.on || !party.playing) return;
     if (party.repeat === "one") {
       party.anchorPos = 0;
-      party.anchorAt = Date.now() + 600;
+      party.anchorAt = hrNow() + 600;
     } else partyGo(party.index + 1, 600);
     recordDiagnostic("party-advanced", { trackId: party.trackId });
     partyBroadcast();
@@ -522,15 +524,16 @@ function cleanMediaQueue(raw) {
 
 function partyAction(body) {
   const action = String(body.action || "");
-  const now = Date.now();
+  const now = hrNow();
   if (action === "start" || action === "load") {
     const mediaQueue = cleanMediaQueue(body.mediaQueue);
     if (mediaQueue.length) party.mediaQueue = mediaQueue;
     const queue = Array.isArray(body.queue) ? body.queue.map(String).slice(0, 2000) : [];
     party.queue = queue.length ? queue : party.mediaQueue.map((item) => item.id);
     if (action === "start") {
+      // A repeated start keeps the original host: the device that switched the party on.
+      if (!party.on || !party.host) party.host = String(body.deviceId || "").slice(0, 64);
       party.on = true;
-      party.host = String(body.deviceId || "").slice(0, 64);
     }
     const trackId = String(body.trackId || party.trackId || party.queue[0] || "");
     party.index = Math.max(0, party.queue.indexOf(trackId));
@@ -543,10 +546,23 @@ function partyAction(body) {
   }
   if (!party.on) return false;
   if (action === "stop") {
+    // Freeze the shared timeline: the host carries on from exactly here, everyone else stops.
+    const wasPlaying = party.playing;
+    party.anchorPos = partyPosition(now);
+    party.anchorAt = now;
     party.on = false;
-    party.playing = false;
-    // Only the device that started the party keeps playing; everyone else is silenced.
-    for (const id of devices.keys()) if (id !== party.host) stopDevice(id);
+    party.playing = wasPlaying;
+    clearTimeout(partyTimer);
+    // Sent after the "party off" broadcast, so followers no longer treat it as a stray party STOP.
+    const host = party.host;
+    setTimeout(() => {
+      for (const id of devices.keys()) if (id !== host) stopDevice(id);
+    }, 300);
+    if (party.host && devices.has(party.host)) {
+      activeId = party.host;
+      activeTrackId = party.trackId;
+      savePlaybackState(party.host, { playing: wasPlaying, position: party.anchorPos, duration: Number(partyTrack()?.secs || 0) });
+    }
     return true;
   }
   if (action === "play" || action === "pause" || action === "toggle") {
@@ -849,7 +865,8 @@ async function onPost(req, res, url) {
         sendJson(res, 409, { ok: false, error: "This device is not connected or has no current track." });
         return;
       }
-      if (activeId && activeId !== id) {
+      // During a party every device plays on purpose, so a claim must not silence the others.
+      if (activeId && activeId !== id && !party.on) {
         const previous = devices.get(activeId);
         if (previous) {
           const stop = { type: "STOP", id: seq++, to: activeId };
@@ -1051,7 +1068,7 @@ const server = createServer((req, res) => {
   if (req.method === "GET" && url.pathname === "/v1/time") {
     cors(res);
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-    res.end(JSON.stringify({ now: Date.now() }));
+    res.end(JSON.stringify({ now: hrNow() }));
     return;
   }
   if (req.method === "GET" && url.pathname === "/v1/party") {
