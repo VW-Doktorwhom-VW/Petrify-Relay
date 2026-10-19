@@ -9,10 +9,10 @@
     "versions": [
       {
         "version": "1.0.1.0",
-        "changelog": "Updated Petrify Node relay service configuration.",
+        "changelog": "Force overwrite extracted server.mjs resource on startup.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "f84f1d032d07b0a9690a7630fed059bb"
+        "checksum": "bc9667172eb646fa684d57d2a9fc9ed9"
       }
     ]
   }
