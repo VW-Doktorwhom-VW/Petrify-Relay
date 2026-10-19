@@ -8,11 +8,11 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.0.0.0",
-        "changelog": "Self-contained initial production release.",
+        "version": "1.0.1.0",
+        "changelog": "Updated Petrify Node relay service configuration.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "abdebe421372af9699f066dc3c0be2c1"
+        "checksum": "550c8ad3fa25a41f714c6a5ed6910cef"
       }
     ]
   }

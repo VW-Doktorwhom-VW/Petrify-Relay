@@ -1,0 +1,1170 @@
+/**
+ * Petrify service. Run this on the machine that stays on.
+ * Clients (Windows app, Android app, browser) connect to it.
+ * They do not connect to each other.
+ *
+ *   node service/server.mjs
+ *
+ * Default address: http://0.0.0.0:8787
+ */
+import { createServer } from "node:http";
+import { createSocket } from "node:dgram";
+import { networkInterfaces } from "node:os";
+import { URL } from "node:url";
+
+const PORT = Number(process.env.PETRIFY_PORT || 8787);
+const DISCOVERY_PORT = Number(process.env.PETRIFY_DISCOVERY_PORT || 8788);
+const PLAYER_PORT = Number(process.env.PETRIFY_PLAYER_PORT || 8090);
+const ALLOWED = ["/Items/", "/Audio/", "/Images/", "/Playlists/", "/System/", "/Users/", "/Sessions/"];
+const devices = new Map();
+const playbackState = new Map();
+const playbackSnapshots = new Map();
+const diagnosticEvents = [];
+const transferStates = new Map();
+const pendingTransfers = new Map();
+const userByToken = new Map();
+let seq = 1;
+let activeId = "";
+let activeTrackId = "";
+
+function savePlaybackState(deviceId, state) {
+  playbackState.set(deviceId, { ...state, updatedAt: Date.now() });
+}
+
+const freshWaiters = new Map();
+
+// Asks the playing device for its exact position, only when a transfer is requested.
+function requestFreshState(deviceId, ms = 1200) {
+  const device = devices.get(deviceId);
+  if (!device || !device.res.size) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      freshWaiters.delete(deviceId);
+      resolve(false);
+    }, ms);
+    freshWaiters.set(deviceId, () => {
+      clearTimeout(timer);
+      freshWaiters.delete(deviceId);
+      resolve(true);
+    });
+    const command = { type: "REPORT", id: seq++, to: deviceId };
+    for (const sock of device.res) writeSse(sock, room(command));
+  });
+}
+
+function currentPlaybackState(deviceId) {
+  const state = playbackState.get(deviceId);
+  if (!state) return null;
+  const elapsed = state.playing ? Math.max(0, (Date.now() - (state.updatedAt || Date.now())) / 1000) : 0;
+  const position = state.position + elapsed;
+  return {
+    ...state,
+    position: state.duration > 0 ? Math.min(state.duration, position) : position,
+  };
+}
+
+function targetMediaUrl(raw, target) {
+  if (!raw || !target?.origin) return raw;
+  try {
+    const url = new URL(raw, target.origin);
+    if (url.pathname !== "/api/jf") return raw;
+    return `${target.origin}${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return raw;
+  }
+}
+
+function playbackSnapshot(body, fallbackTrackId = "") {
+  const trackId = String(body.trackId || fallbackTrackId || "");
+  const mediaUrl = String(body.mediaUrl || "");
+  const mediaQueue = Array.isArray(body.mediaQueue)
+    ? body.mediaQueue.slice(0, 200)
+      .filter((item) => item && typeof item.id === "string" && typeof item.url === "string")
+      .map((item) => ({
+        id: item.id,
+        title: String(item.title || ""),
+        artist: String(item.artist || ""),
+        album: String(item.album || ""),
+        url: item.url,
+        cover: String(item.cover || ""),
+      }))
+    : [];
+  if (!mediaQueue.length && trackId && mediaUrl) {
+    mediaQueue.push({
+      id: trackId,
+      title: String(body.title || ""),
+      artist: String(body.artist || ""),
+      album: String(body.album || ""),
+      url: mediaUrl,
+      cover: String(body.cover || ""),
+    });
+  }
+  return {
+    trackId,
+    mediaUrl,
+    title: String(body.title || ""),
+    artist: String(body.artist || ""),
+    album: String(body.album || ""),
+    cover: String(body.cover || ""),
+    position: Math.max(0, Number(body.position) || 0),
+    duration: Math.max(0, Number(body.duration) || 0),
+    volume: typeof body.volume === "number" && Number.isFinite(body.volume)
+      ? Math.max(0, Math.min(1, body.volume))
+      : undefined,
+    queue: Array.isArray(body.queue) ? body.queue.slice(0, 200).map(String) : [trackId],
+    mediaQueue,
+  };
+}
+
+function recordDiagnostic(event, details = {}) {
+  const safeDetails = { ...details };
+  if (typeof safeDetails.error === "string") {
+    safeDetails.error = safeDetails.error
+      .replace(/https?:\/\/\S+/gi, "[url]")
+      .replace(/([?&](?:token|api_key|apikey|password)=)[^&\s]*/gi, "$1[redacted]");
+  }
+  const entry = {
+    time: new Date().toISOString(),
+    event: String(event).slice(0, 80),
+    ...safeDetails,
+  };
+  diagnosticEvents.push(entry);
+  if (diagnosticEvents.length > 500) diagnosticEvents.shift();
+  console.log(`[${entry.time}] ${entry.event} ${JSON.stringify(safeDetails)}`);
+  return entry;
+}
+
+function setTransferState(transferId, status, details = {}) {
+  if (!transferId) return;
+  const entry = { transferId, status, updatedAt: new Date().toISOString(), ...details };
+  transferStates.set(transferId, entry);
+  recordDiagnostic(`transfer-${status}`, { transferId, ...details });
+  while (transferStates.size > 100) transferStates.delete(transferStates.keys().next().value);
+  broadcast(room({ type: "TRANSFER_STATUS", id: seq++, transfer: entry }));
+}
+
+function stopDevice(deviceId) {
+  const device = devices.get(deviceId);
+  if (!device || party.on) return;
+  const stop = { type: "STOP", id: seq++, to: deviceId };
+  for (const sock of device.res) writeSse(sock, room(stop));
+  const state = playbackState.get(deviceId);
+  if (state) savePlaybackState(deviceId, { ...currentPlaybackState(deviceId), playing: false });
+}
+
+function restoreTransferSource(transferId, reason) {
+  const pending = pendingTransfers.get(transferId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingTransfers.delete(transferId);
+  stopDevice(pending.targetId);
+  savePlaybackState(pending.targetId, {
+    ...(currentPlaybackState(pending.targetId) || { position: 0, duration: 0 }),
+    playing: false,
+  });
+  if (pending.sourceId && devices.has(pending.sourceId)) {
+    activeId = pending.sourceId;
+    activeTrackId = pending.sourceTrackId;
+    savePlaybackState(pending.sourceId, pending.sourceState);
+  } else {
+    activeId = "";
+    activeTrackId = "";
+  }
+  broadcast(room(null));
+  setTransferState(transferId, "failed", {
+    sourceId: pending.sourceId,
+    targetId: pending.targetId,
+    trackId: pending.sourceTrackId,
+    error: reason,
+  });
+}
+
+function cors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+}
+
+function sendJson(res, code, body) {
+  cors(res);
+  const data = JSON.stringify(body);
+  res.writeHead(code, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) });
+  res.end(data);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString() || "{}"));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+
+function authHeaders(token, deviceId) {
+  const tokenPart = token ? `, Token="${token}"` : "";
+  const scheme = `MediaBrowser Client="Petrify", Device="Petrify", DeviceId="${deviceId}", Version="1.0.0"${tokenPart}`;
+  const headers = {
+    Authorization: scheme,
+    "X-Emby-Authorization": scheme,
+  };
+  if (token) headers["X-Emby-Token"] = token;
+  return headers;
+}
+
+async function jf(base, path, token, deviceId, init = {}) {
+  const headers = { ...authHeaders(token, deviceId), ...(init.headers || {}) };
+  const res = await fetch(`${base}${path}`, { ...init, headers });
+  return res;
+}
+
+function cleanBase(raw) {
+  const url = new URL(String(raw || "").trim());
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Use an http or https address.");
+  return url.toString().replace(/\/$/, "");
+}
+
+function absolute(req, pathAndQuery) {
+  const host = req.headers.host || `127.0.0.1:${PORT}`;
+  return `http://${host}${pathAndQuery}`;
+}
+
+function mediaUrl(req, base, token, deviceId, path) {
+  return absolute(
+    req,
+    `/api/jf?base=${encodeURIComponent(base)}&token=${encodeURIComponent(token)}&device=${encodeURIComponent(deviceId)}&path=${encodeURIComponent(path)}`,
+  );
+}
+
+async function login(req, body) {
+  const base = cleanBase(body.url);
+  const deviceId = String(body.deviceId || "petrify").replace(/[^\w.-]/g, "").slice(0, 64) || "petrify";
+  const infoRes = await jf(base, "/System/Info/Public", body.apiKey || "", deviceId);
+  if (!infoRes.ok) return { ok: false, error: `Jellyfin answered ${infoRes.status}.` };
+  const info = await infoRes.json();
+  let token = String(body.apiKey || "").trim();
+  let userId = "";
+  if (!token) {
+    if (!body.username || !body.password) return { ok: false, error: "Enter a username and password, or an API key." };
+    const authRes = await jf(base, "/Users/AuthenticateByName", "", deviceId, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ Username: body.username, Pw: body.password }),
+    });
+    if (!authRes.ok) {
+      const detail = (await authRes.text()).slice(0, 180);
+      return { ok: false, error: `Sign-in was refused (${authRes.status})${detail ? `: ${detail}` : "."}` };
+    }
+    const auth = await authRes.json();
+    token = auth.AccessToken || "";
+    userId = auth.User?.Id || "";
+    if (!token) return { ok: false, error: "Jellyfin did not return a token." };
+  } else {
+    const me = await jf(base, "/Users/Me", token, deviceId);
+    if (me.ok) userId = (await me.json()).Id || "";
+  }
+  const q = userId ? `/Users/${userId}/Items` : "/Items";
+  // Jellyfin pages large libraries, so walk every page instead of stopping at the first one.
+  const pages = async (path, max = 100000) => {
+    const items = [];
+    for (let start = 0; start < max; start += 500) {
+      const res = await jf(base, `${path}&StartIndex=${start}&Limit=${Math.min(500, max - start)}`, token, deviceId);
+      if (!res.ok) {
+        if (!start) return null;
+        break;
+      }
+      const body = await res.json();
+      const got = body.Items || [];
+      items.push(...got);
+      if (!got.length || items.length >= Number(body.TotalRecordCount ?? 0)) break;
+    }
+    return items;
+  };
+  const trackItems = await pages(
+    `${q}?IncludeItemTypes=Audio&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Fields=Album,AlbumArtists,Artists,Genres,RunTimeTicks,MediaSources,ProductionYear`,
+    2000,
+  );
+  if (!trackItems) return { ok: false, error: "Library request failed." };
+  const albumItems =
+    (await pages(`${q}?IncludeItemTypes=MusicAlbum&Recursive=true&SortBy=SortName&SortOrder=Ascending&Fields=AlbumArtists,ProductionYear,DateCreated`)) || [];
+  const toTrack = (item) => {
+    const id = String(item.Id || "");
+    const albumId = String(item.AlbumId || "");
+    const artists = Array.isArray(item.Artists) ? item.Artists.map(String) : [];
+    return {
+      id,
+      title: String(item.Name || "Untitled"),
+      artist: artists[0] || String(item.AlbumArtist || "Unknown"),
+      albumId,
+      album: String(item.Album || ""),
+      cover: mediaUrl(req, base, token, deviceId, `/Items/${albumId || id}/Images/Primary?maxWidth=600&quality=80`),
+      src: mediaUrl(
+        req,
+        base,
+        token,
+        deviceId,
+        `/Audio/${id}/universal?Container=mp3&AudioCodec=mp3&TranscodingContainer=mp3&MaxStreamingBitrate=256000&TranscodingProtocol=http`,
+      ),
+      secs: Number(item.RunTimeTicks || 0) / 10_000_000 || 0,
+      size: Number(item.MediaSources?.[0]?.Size || 0),
+      bitrate: Number(item.MediaSources?.[0]?.Bitrate || 0),
+      container: String(item.MediaSources?.[0]?.Container || item.Container || ""),
+      year: item.ProductionYear ? String(item.ProductionYear) : "",
+      genres: Array.isArray(item.Genres) ? item.Genres.map(String) : [],
+      artists: artists,
+      albumArtist: String(item.AlbumArtist || artists[0] || "Unknown"),
+      kind: "music",
+      lyrics: [],
+    };
+  };
+  const tracks = trackItems.map(toTrack);
+  const known = new Set(tracks.map((t) => t.id));
+  const albums = albumItems.map((item) => {
+    const id = String(item.Id || "");
+    return {
+      id,
+      title: String(item.Name || "Untitled"),
+      artist: String(item.AlbumArtist || "Unknown"),
+      year: item.ProductionYear ? String(item.ProductionYear) : "",
+      cover: mediaUrl(req, base, token, deviceId, `/Items/${id}/Images/Primary?maxWidth=600&quality=80`),
+    };
+  });
+  const playlistItems = (await pages(`${q}?IncludeItemTypes=Playlist&Recursive=true&SortBy=SortName`, 200)) || [];
+  const playlists = [];
+  for (const pl of playlistItems) {
+    const id = String(pl.Id || "");
+    const kids =
+      (await pages(`/Playlists/${id}/Items?UserId=${userId}&Fields=Album,AlbumArtists,Artists,Genres,RunTimeTicks,MediaSources,ProductionYear`, 3000)) || [];
+    for (const item of kids) {
+      const t = toTrack(item);
+      if (t.id && !known.has(t.id)) {
+        known.add(t.id);
+        tracks.push(t);
+      }
+    }
+    playlists.push({
+      id,
+      title: String(pl.Name || "Playlist"),
+      sub: `${kids.length} songs`,
+      cover: mediaUrl(req, base, token, deviceId, `/Items/${id}/Images/Primary?maxWidth=400&quality=80`),
+      trackIds: kids.map((item) => String(item.Id || "")),
+    });
+  }
+  const colRes = await jf(base, `${q}?IncludeItemTypes=BoxSet&Recursive=true&Limit=40`, token, deviceId);
+  const colJson = colRes.ok ? await colRes.json() : { Items: [] };
+  const shelf = (kind) => {
+    const groups = new Map();
+    for (const track of tracks) {
+      const names = kind === "genre" ? track.genres : kind === "albumArtist" ? [track.albumArtist] : track.artists.length ? track.artists : [track.artist];
+      for (const name of names) {
+        if (!name) continue;
+        const ids = groups.get(name) || [];
+        ids.push(track.id);
+        groups.set(name, ids);
+      }
+    }
+    return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([title, trackIds]) => ({
+      id: title,
+      title,
+      sub: `${trackIds.length} songs`,
+      cover: "",
+      trackIds,
+    }));
+  };
+  return {
+    ok: true,
+    serverName: info.ServerName || "Jellyfin",
+    token,
+    userId,
+    tracks,
+    albums,
+    playlists,
+    suggestions: albumItems
+      .map((item, i) => [String(item.DateCreated || ""), albums[i]])
+      .sort((x, y) => y[0].localeCompare(x[0]))
+      .slice(0, 16)
+      .map((pair) => pair[1]),
+    albumArtists: shelf("albumArtist"),
+    artists: shelf("artist"),
+    genres: shelf("genre"),
+    collections: (colJson.Items || []).map((item) => ({
+      id: String(item.Id || ""),
+      title: String(item.Name || "Collection"),
+      sub: "Collection",
+      cover: mediaUrl(req, base, token, deviceId, `/Items/${item.Id}/Images/Primary?maxWidth=400&quality=80`),
+      trackIds: [],
+    })),
+  };
+}
+
+function listDevices() {
+  return [...devices.values()].map((device) => ({
+    id: device.id,
+    name: device.name,
+    kind: device.kind || "",
+    playing: device.id === activeId && Boolean(currentPlaybackState(device.id)?.playing),
+    trackId: device.id === activeId ? activeTrackId : "",
+    position: device.id === activeId ? currentPlaybackState(device.id)?.position || 0 : 0,
+    duration: device.id === activeId ? currentPlaybackState(device.id)?.duration || 0 : 0,
+  }));
+}
+
+function room(command = null) {
+  return { devices: listDevices(), activeId, command };
+}
+
+function writeSse(res, data) {
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function broadcast(data, only) {
+  for (const [id, device] of devices) {
+    if (only && id !== only) continue;
+    for (const res of device.res) {
+      try {
+        writeSse(res, data);
+      } catch {
+        device.res.delete(res);
+      }
+    }
+  }
+}
+
+// Party mode: the service owns one shared timeline and every device follows it.
+const party = {
+  on: false,
+  rev: 0,
+  host: "",
+  mediaQueue: [],
+  queue: [],
+  index: 0,
+  trackId: "",
+  anchorPos: 0,
+  anchorAt: 0,
+  playing: false,
+  repeat: "off",
+};
+let partyTimer = null;
+
+function partyPosition(now = Date.now()) {
+  if (!party.playing) return party.anchorPos;
+  return Math.max(0, party.anchorPos + (now - party.anchorAt) / 1000);
+}
+
+function partyTrack(id = party.trackId) {
+  return party.mediaQueue.find((item) => item.id === id) || null;
+}
+
+function partyPublic() {
+  return { ...party, serverNow: Date.now() };
+}
+
+function partyBroadcast() {
+  party.rev += 1;
+  schedulePartyAdvance();
+  broadcast({ ...room({ type: "PARTY", party: partyPublic() }) });
+}
+
+function partyGo(index, lead = 1200) {
+  const ids = party.queue.length ? party.queue : party.mediaQueue.map((item) => item.id);
+  if (!ids.length) return;
+  if (index >= ids.length) {
+    if (party.repeat === "all") index = 0;
+    else {
+      party.playing = false;
+      party.anchorPos = 0;
+      party.anchorAt = Date.now();
+      return;
+    }
+  }
+  party.index = Math.max(0, index);
+  party.trackId = ids[party.index];
+  party.anchorPos = 0;
+  party.anchorAt = Date.now() + lead;
+  party.playing = true;
+}
+
+function schedulePartyAdvance() {
+  clearTimeout(partyTimer);
+  partyTimer = null;
+  if (!party.on || !party.playing) return;
+  const secs = Number(partyTrack()?.secs || 0);
+  if (!(secs > 1)) return;
+  const left = (secs - partyPosition()) * 1000 + Math.max(0, party.anchorAt - Date.now());
+  partyTimer = setTimeout(() => {
+    if (!party.on || !party.playing) return;
+    if (party.repeat === "one") {
+      party.anchorPos = 0;
+      party.anchorAt = Date.now() + 600;
+    } else partyGo(party.index + 1, 600);
+    recordDiagnostic("party-advanced", { trackId: party.trackId });
+    partyBroadcast();
+  }, Math.max(250, left + 150));
+}
+
+function cleanMediaQueue(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 400).map((item) => ({
+    id: String(item?.id || "").slice(0, 80),
+    title: String(item?.title || "").slice(0, 200),
+    artist: String(item?.artist || "").slice(0, 200),
+    album: String(item?.album || "").slice(0, 200),
+    url: String(item?.url || "").slice(0, 2000),
+    cover: String(item?.cover || "").slice(0, 2000),
+    secs: Number(item?.secs || 0) || 0,
+  })).filter((item) => item.id);
+}
+
+function partyAction(body) {
+  const action = String(body.action || "");
+  const now = Date.now();
+  if (action === "start" || action === "load") {
+    const mediaQueue = cleanMediaQueue(body.mediaQueue);
+    if (mediaQueue.length) party.mediaQueue = mediaQueue;
+    const queue = Array.isArray(body.queue) ? body.queue.map(String).slice(0, 2000) : [];
+    party.queue = queue.length ? queue : party.mediaQueue.map((item) => item.id);
+    if (action === "start") {
+      party.on = true;
+      party.host = String(body.deviceId || "").slice(0, 64);
+    }
+    const trackId = String(body.trackId || party.trackId || party.queue[0] || "");
+    party.index = Math.max(0, party.queue.indexOf(trackId));
+    party.trackId = party.queue[party.index] || trackId;
+    party.anchorPos = Math.max(0, Number(body.position || 0));
+    party.anchorAt = now + 1500;
+    party.playing = body.playing !== false && Boolean(party.trackId);
+    if (body.repeat) party.repeat = String(body.repeat);
+    return true;
+  }
+  if (!party.on) return false;
+  if (action === "stop") {
+    party.on = false;
+    party.playing = false;
+    return true;
+  }
+  if (action === "play" || action === "pause" || action === "toggle") {
+    const pos = partyPosition(now);
+    const play = action === "toggle" ? !party.playing : action === "play";
+    party.anchorPos = pos;
+    party.anchorAt = now + (play ? 700 : 0);
+    party.playing = play;
+    return true;
+  }
+  if (action === "seek") {
+    party.anchorPos = Math.max(0, Number(body.position || 0));
+    party.anchorAt = now + (party.playing ? 700 : 0);
+    return true;
+  }
+  if (action === "next") {
+    partyGo(party.index + 1);
+    return true;
+  }
+  if (action === "prev") {
+    if (body.restart !== false && partyPosition(now) > 3) {
+      party.anchorPos = 0;
+      party.anchorAt = now + 700;
+      party.playing = true;
+    } else partyGo(Math.max(0, party.index - 1));
+    return true;
+  }
+  if (action === "ended") {
+    if (String(body.trackId || "") !== party.trackId || !party.playing) return false;
+    const secs = Number(partyTrack()?.secs || 0);
+    if (secs > 1 && partyPosition(now) < secs - 4) return false;
+    partyGo(party.index + 1, 600);
+    return true;
+  }
+  if (action === "repeat") {
+    party.repeat = ["off", "all", "one"].includes(String(body.repeat)) ? String(body.repeat) : "off";
+    return true;
+  }
+  return false;
+}
+
+function playOn(target, body) {
+  const sourceId = activeId;
+  const transferId = String(body.transferId || "");
+  const sourceTrackId = activeTrackId;
+  const sourceState = currentPlaybackState(sourceId) || { playing: false, position: 0, duration: 0 };
+  const targetDevice = devices.get(target);
+  if (activeId && activeId !== target && !transferId) stopDevice(activeId);
+  const snapshot = playbackSnapshot(body, activeTrackId);
+  const command = {
+    type: "PLAY",
+    id: seq++,
+    to: target,
+    trackId: String(body.trackId || ""),
+    mediaUrl: targetMediaUrl(snapshot.mediaUrl, targetDevice),
+    title: snapshot.title,
+    artist: snapshot.artist,
+    album: snapshot.album,
+    cover: snapshot.cover,
+    position: snapshot.position,
+    queue: snapshot.queue,
+    mediaQueue: snapshot.mediaQueue.map((item) => ({ ...item, url: targetMediaUrl(item.url, targetDevice) })),
+    transferId,
+  };
+  if (typeof body.volume === "number" && Number.isFinite(body.volume)) {
+    command.volume = Math.max(0, Math.min(1, body.volume));
+  }
+  const previousPending = transferId ? pendingTransfers.get(transferId) : null;
+  if (previousPending) clearTimeout(previousPending.timer);
+  activeId = target;
+  activeTrackId = command.trackId;
+  playbackSnapshots.set(target, snapshot);
+  savePlaybackState(target, {
+    playing: true,
+    position: command.position,
+    duration: Number(body.duration) || 0,
+  });
+  const bucket = devices.get(target);
+  if (bucket) for (const sock of bucket.res) writeSse(sock, room(command));
+  broadcast(room(null));
+  if (transferId) {
+    setTransferState(transferId, "target-command-sent", {
+      sourceId,
+      targetId: target,
+      trackId: command.trackId,
+      position: command.position,
+      commandId: command.id,
+    });
+    const pending = {
+      sourceId,
+      sourceTrackId,
+      sourceState,
+      targetId: target,
+      timer: setTimeout(() => restoreTransferSource(transferId, "Destination did not confirm playback in time."), 15_000),
+    };
+    pending.timer.unref?.();
+    pendingTransfers.set(transferId, pending);
+  }
+}
+
+async function resolveUserId(root, token, deviceId) {
+  const cached = userByToken.get(token);
+  if (cached) return cached;
+  for (const path of ["/Users/Me", "/Users"]) {
+    const headers = path === "/Users" ? {} : authHeaders(token, deviceId);
+    const url = new URL(path, root);
+    if (path === "/Users") url.searchParams.set("api_key", token);
+    const res = await fetch(url, { headers });
+    if (!res.ok) continue;
+    const body = await res.json();
+    const id = Array.isArray(body) ? body[0]?.Id : body?.Id;
+    if (id) {
+      userByToken.set(token, id);
+      return id;
+    }
+  }
+  return "";
+}
+
+async function pull(url, token, deviceId, mode, range) {
+  const next = new URL(url);
+  const headers = mode === "header" ? authHeaders(token, deviceId) : {};
+  if (range) headers.Range = range;
+  if (mode === "key") next.searchParams.set("api_key", token);
+  let upstream = await fetch(next, { headers, redirect: "manual" });
+  for (let hop = 0; hop < 3 && upstream.status >= 300 && upstream.status < 400; hop++) {
+    const loc = upstream.headers.get("location");
+    if (!loc) break;
+    const hopUrl = new URL(loc, next);
+    if (hopUrl.origin !== next.origin) break;
+    if (mode === "key" && token) hopUrl.searchParams.set("api_key", token);
+    upstream = await fetch(hopUrl, { headers, redirect: "manual" });
+  }
+  return upstream;
+}
+
+async function proxyJellyfin(req, res, incoming) {
+  const base = incoming.searchParams.get("base") || "";
+  const device = incoming.searchParams.get("device") || "petrify";
+  const token = incoming.searchParams.get("token") || "";
+  const path = incoming.searchParams.get("path") || "";
+  let target;
+  try {
+    const root = new URL(base);
+    if (root.protocol !== "http:" && root.protocol !== "https:") {
+      res.writeHead(400);
+      res.end("Bad base");
+      return;
+    }
+    if (!path.startsWith("/") || path.startsWith("//") || !ALLOWED.some((p) => path.startsWith(p))) {
+      res.writeHead(400);
+      res.end("Path not allowed");
+      return;
+    }
+    target = new URL(path, root);
+    if (target.origin !== root.origin) {
+      res.writeHead(400);
+      res.end("Bad target");
+      return;
+    }
+  } catch {
+    res.writeHead(400);
+    res.end("Bad request");
+    return;
+  }
+  if (token && path.startsWith("/Audio/") && !target.searchParams.has("UserId")) {
+    const userId = await resolveUserId(target, token, device);
+    if (userId) target.searchParams.set("UserId", userId);
+  }
+  const range = req.headers.range;
+  let upstream = token
+    ? await pull(target, token, device, "header", range)
+    : await fetch(target, { headers: range ? { Range: range } : {}, redirect: "follow" });
+  if (token && upstream.status === 401) upstream = await pull(target, token, device, "key", range);
+  const headers = { "Access-Control-Allow-Origin": "*" };
+  const type = upstream.headers.get("content-type");
+  if (type) headers["Content-Type"] = type;
+  const len = upstream.headers.get("content-length");
+  if (len) headers["Content-Length"] = len;
+  const contentRange = upstream.headers.get("content-range");
+  if (contentRange) headers["Content-Range"] = contentRange;
+  const acceptRanges = upstream.headers.get("accept-ranges");
+  if (acceptRanges) headers["Accept-Ranges"] = acceptRanges;
+  headers["Cache-Control"] = path.startsWith("/Audio/") ? "no-store" : "public, max-age=2592000";
+  res.writeHead(upstream.status, headers);
+  if (upstream.body) {
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(value);
+    }
+  }
+  res.end();
+}
+
+async function onPost(req, res, url) {
+  let body = {};
+  try {
+    body = await readBody(req);
+  } catch {
+    sendJson(res, 400, { ok: false, error: "Bad JSON" });
+    return;
+  }
+  if (url.pathname === "/v1/login") {
+    try {
+      sendJson(res, 200, await login(req, body));
+    } catch (err) {
+      sendJson(res, 200, { ok: false, error: err instanceof Error ? err.message : "Could not reach Jellyfin." });
+    }
+    return;
+  }
+  if (url.pathname === "/v1/party") {
+    const changed = partyAction(body);
+    if (changed) {
+      recordDiagnostic("party-" + String(body.action || "update"), {
+        deviceId: String(body.deviceId || ""),
+        trackId: party.trackId,
+        position: party.anchorPos,
+      });
+      partyBroadcast();
+    }
+    sendJson(res, 200, { ok: true, changed, party: partyPublic() });
+    return;
+  }
+  if (url.pathname === "/v1/diagnostics") {
+    const deviceId = String(body.deviceId || "").slice(0, 64);
+    const event = String(body.event || "").slice(0, 80);
+    if (!deviceId || !event || !devices.has(deviceId)) {
+      sendJson(res, 409, { ok: false, error: "Connect this device before sending diagnostics." });
+      return;
+    }
+    const details = body.details && typeof body.details === "object" ? body.details : {};
+    const safeDetails = {};
+    for (const key of ["transferId", "trackId", "targetId", "sourceId", "commandId", "position", "duration", "elapsedMs", "status", "method", "path", "httpStatus", "error"]) {
+      if (details[key] !== undefined) safeDetails[key] = String(details[key]).slice(0, 240);
+    }
+    if (safeDetails.error) {
+      safeDetails.error = safeDetails.error
+        .replace(/https?:\/\/\S+/gi, "[url]")
+        .replace(/([?&](?:token|api_key|apikey|password)=)[^&\s]*/gi, "$1[redacted]");
+    }
+    recordDiagnostic(event, { deviceId, ...safeDetails });
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (url.pathname === "/v1/transfer-state") {
+    const transferId = String(body.transferId || "").slice(0, 80);
+    const state = transferStates.get(transferId);
+    if (body.transferAck === true || body.transferAck === false) {
+      const targetId = String(body.deviceId || "").slice(0, 64);
+      if (!state || state.targetId !== targetId || !devices.has(targetId)) {
+        sendJson(res, 409, { ok: false, error: "Transfer acknowledgement does not match a pending destination." });
+        return;
+      }
+      if (state.status === "completed" || state.status === "failed") {
+        sendJson(res, 200, { ok: true, transfer: state });
+        return;
+      }
+      if (!body.transferAck) {
+        restoreTransferSource(transferId, String(body.error || "Destination could not start playback.").slice(0, 240));
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      const pending = pendingTransfers.get(transferId);
+      if (!pending || activeId !== targetId) {
+        sendJson(res, 409, { ok: false, error: "This transfer is no longer active." });
+        return;
+      }
+      clearTimeout(pending.timer);
+      pendingTransfers.delete(transferId);
+      if (pending.sourceId && pending.sourceId !== targetId) stopDevice(pending.sourceId);
+      activeId = targetId;
+      activeTrackId = state.trackId || activeTrackId;
+      const targetState = playbackState.get(targetId) || { playing: true, position: 0, duration: 0 };
+      savePlaybackState(targetId, {
+        ...targetState,
+        playing: true,
+        position: Number.isFinite(Number(body.position)) ? Math.max(0, Number(body.position)) : targetState.position,
+      });
+      broadcast(room(null));
+      setTransferState(transferId, "completed", {
+        sourceId: pending.sourceId,
+        targetId,
+        trackId: state.trackId,
+        position: Number(body.position) || 0,
+      });
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    sendJson(res, 200, { ok: true, transfer: state || null });
+    return;
+  }
+  if (url.pathname === "/api/connect-live" || url.pathname === "/v1/connect") {
+    const id = String(body.deviceId || "").slice(0, 64);
+    const target = String(body.transferTo || "").slice(0, 64);
+    if (id && body.name && devices.has(id)) devices.get(id).name = String(body.name).slice(0, 40);
+    if (body.claim) {
+      if (!id || !devices.has(id) || !(body.trackId || body.mediaUrl)) {
+        sendJson(res, 409, { ok: false, error: "This device is not connected or has no current track." });
+        return;
+      }
+      if (activeId && activeId !== id) {
+        const previous = devices.get(activeId);
+        if (previous) {
+          const stop = { type: "STOP", id: seq++, to: activeId };
+          for (const sock of previous.res) writeSse(sock, room(stop));
+        }
+      }
+      activeId = id;
+      activeTrackId = String(body.trackId || "");
+      const snapshot = playbackSnapshot(body, activeTrackId);
+      if (snapshot.mediaUrl || snapshot.mediaQueue.length) {
+        playbackSnapshots.set(id, snapshot);
+      } else {
+        playbackSnapshots.delete(id);
+      }
+      savePlaybackState(id, { playing: true, position: Number(body.position) || 0, duration: Number(body.duration) || 0 });
+      recordDiagnostic("playback-claimed", { deviceId: id, trackId: activeTrackId, position: Number(body.position) || 0 });
+      broadcast(room(null));
+      sendJson(res, 200, { ok: true, devices: listDevices(), activeId });
+      return;
+    }
+    if (body.control) {
+      const actions = new Set(["PLAY", "PAUSE", "TOGGLE", "NEXT", "PREVIOUS", "SEEK"]);
+      const action = String(body.control).toUpperCase();
+      const active = devices.get(activeId);
+      if (!id || !devices.has(id) || !activeId || !active || !active.res.size || !actions.has(action)) {
+        sendJson(res, 409, { ok: false, error: "There is no active playback device to control." });
+        return;
+      }
+      const command = {
+        type: "CONTROL",
+        id: seq++,
+        to: activeId,
+        action,
+        value: Number.isFinite(Number(body.value)) ? Number(body.value) : undefined,
+      };
+      for (const sock of active.res) writeSse(sock, room(command));
+      recordDiagnostic("playback-control-dispatched", {
+        deviceId: id,
+        targetId: activeId,
+        status: action,
+        commandId: command.id,
+      });
+      sendJson(res, 200, { ok: true, activeId });
+      return;
+    }
+    if (typeof body.playing === "boolean") {
+      if (id && id === activeId && devices.has(id)) {
+        savePlaybackState(id, {
+          playing: body.playing,
+          position: Math.max(0, Number(body.position) || 0),
+          duration: Math.max(0, Number(body.duration) || 0),
+        });
+        freshWaiters.get(id)?.();
+        if (body.trackId) {
+          const reportedTrackId = String(body.trackId);
+          if (reportedTrackId !== activeTrackId) {
+            activeTrackId = reportedTrackId;
+            const snapshot = playbackSnapshots.get(id);
+            if (snapshot && snapshot.trackId !== reportedTrackId) playbackSnapshots.delete(id);
+          }
+        }
+        recordDiagnostic("playback-state-reported", {
+          deviceId: id,
+          trackId: activeTrackId,
+          position: Math.max(0, Number(body.position) || 0),
+          status: body.playing ? "playing" : "paused",
+        });
+        broadcast(room(null));
+      }
+      sendJson(res, 200, { ok: true, devices: listDevices(), activeId });
+      return;
+    }
+    if (id && typeof body.volume === "number" && !target && !body.trackId && !body.mediaUrl) {
+      if (id === activeId) {
+        const snapshot = playbackSnapshots.get(id);
+        if (snapshot) {
+          playbackSnapshots.set(id, {
+            ...snapshot,
+            volume: Math.max(0, Math.min(1, Number(body.volume))),
+          });
+        }
+      }
+      const command = {
+        type: "VOLUME",
+        id: seq++,
+        volume: Math.max(0, Math.min(1, Number(body.volume))),
+        gain: typeof body.gain === "number" ? Math.max(0, Math.min(1, body.gain)) : undefined,
+      };
+      for (const [devId, device] of devices) {
+        if (devId === id) continue;
+        for (const sock of device.res) writeSse(sock, room(command));
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (body.snapshot) {
+      if (!target || !devices.has(target) || !(body.trackId || body.mediaUrl)) {
+        sendJson(res, 409, { ok: false, error: "The destination is no longer connected or the source has no current track." });
+        return;
+      }
+      if (activeId && activeId !== target) {
+        sendJson(res, 409, {
+          ok: false,
+          error: "An active playback source exists. Request a relay-owned transfer instead of sending a device snapshot.",
+        });
+        return;
+      }
+      if (body.transferId) setTransferState(String(body.transferId), "snapshot-received", {
+        sourceId: id,
+        targetId: target,
+        trackId: String(body.trackId || ""),
+        position: Number(body.position) || 0,
+      });
+      playOn(target, body);
+      sendJson(res, 200, { ok: true, devices: listDevices(), activeId });
+      return;
+    }
+    if (body.pull) {
+      const source = devices.get(activeId);
+      const destination = devices.get(target);
+      if (!target || target === activeId || !destination?.res.size || !activeId || !source?.res.size) {
+        sendJson(res, 409, {
+          ok: false,
+          error: "Playback transfer needs a connected source and a connected, different destination.",
+        });
+        return;
+      }
+      const transferId = String(body.transferId || `transfer-${Date.now().toString(36)}-${seq}`).slice(0, 80);
+      await requestFreshState(activeId);
+      const cachedSnapshot = playbackSnapshots.get(activeId);
+      if (!cachedSnapshot || (!cachedSnapshot.mediaUrl && !cachedSnapshot.mediaQueue.length)) {
+        recordDiagnostic("transfer-snapshot-missing", {
+          transferId,
+          sourceId: activeId,
+          targetId: target,
+          trackId: activeTrackId,
+        });
+        sendJson(res, 409, {
+          ok: false,
+          error: "The active player has not registered a playable track yet. Start playback on the updated app, then try again.",
+        });
+        return;
+      }
+      const state = currentPlaybackState(activeId);
+      const snapshot = {
+        ...cachedSnapshot,
+        trackId: activeTrackId || cachedSnapshot.trackId,
+        position: state?.position ?? cachedSnapshot.position,
+        duration: state?.duration || cachedSnapshot.duration,
+        transferTo: target,
+        transferId,
+      };
+      setTransferState(transferId, "requested", {
+        sourceId: activeId,
+        targetId: target,
+        trackId: snapshot.trackId,
+        position: snapshot.position,
+        delivery: "cached-snapshot",
+      });
+      setTransferState(transferId, "snapshot-received", {
+        sourceId: activeId,
+        targetId: target,
+        trackId: snapshot.trackId,
+        position: snapshot.position,
+      });
+      playOn(target, snapshot);
+      sendJson(res, 200, { ok: true, pulled: true, transferId, delivery: "cached-snapshot", devices: listDevices(), activeId });
+      return;
+    }
+    if (target && devices.get(target)?.res.size && activeId && activeId !== target) {
+      sendJson(res, 409, {
+        ok: false,
+        error: "An active playback source exists. Request a relay-owned transfer instead of sending a device snapshot.",
+      });
+      return;
+    }
+    if (target && devices.get(target)?.res.size && (body.trackId || body.mediaUrl)) playOn(target, body);
+    else broadcast(room(null));
+    const ok = Boolean(target && devices.get(target)?.res.size && (body.trackId || body.mediaUrl));
+    if (!ok) recordDiagnostic("play-request-rejected", { deviceId: id, targetId: target, reason: "Target is not connected or track data is missing." });
+    sendJson(res, 200, { ok, error: ok ? undefined : "Target is not connected or track data is missing.", devices: listDevices(), activeId });
+    return;
+  }
+  sendJson(res, 404, { ok: false, error: "Not found" });
+}
+
+const server = createServer((req, res) => {
+  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  if (req.method === "OPTIONS") {
+    cors(res);
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/v1/health") {
+    sendJson(res, 200, { ok: true, service: "petrify", connectProtocol: 7, party: party.on, devices: listDevices() });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/v1/time") {
+    cors(res);
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ now: Date.now() }));
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/v1/party") {
+    sendJson(res, 200, { ok: true, party: partyPublic() });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
+    sendJson(res, 200, {
+      events: diagnosticEvents.slice(-200).reverse(),
+      transfers: [...transferStates.values()].reverse(),
+      devices: listDevices(),
+      activeId,
+    });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/v1/transfer-state") {
+    const transferId = String(url.searchParams.get("transferId") || "").slice(0, 80);
+    sendJson(res, 200, { ok: true, transfer: transferStates.get(transferId) || null });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/v1/devices") {
+    sendJson(res, 200, { devices: listDevices(), activeId });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/jf") {
+    proxyJellyfin(req, res, url).catch((err) => {
+      res.writeHead(502);
+      res.end(err instanceof Error ? err.message : "Proxy failed");
+    });
+    return;
+  }
+  if (req.method === "GET" && (url.pathname === "/api/connect-live" || url.pathname === "/v1/connect")) {
+    const id = (url.searchParams.get("device") || "").slice(0, 64);
+    const name = (url.searchParams.get("name") || "Petrify").slice(0, 40);
+    const kind = ["phone", "tablet", "laptop", "desktop"].includes(url.searchParams.get("kind") || "") ? url.searchParams.get("kind") : "";
+    if (!id) {
+      res.writeHead(400);
+      res.end("device required");
+      return;
+    }
+    cors(res);
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    });
+    res.write(": open\n\n");
+    const keepalive = setInterval(() => {
+      if (!res.destroyed) res.write(": keep-alive\n\n");
+    }, 15_000);
+    let bucket = devices.get(id);
+    if (!bucket) {
+      bucket = { id, name, origin: "", res: new Set() };
+      devices.set(id, bucket);
+    }
+    bucket.name = name;
+    if (kind) bucket.kind = kind;
+    const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+    const protocol = forwardedProto === "https" ? "https" : req.socket.encrypted ? "https" : "http";
+    bucket.origin = `${protocol}://${req.headers.host || `127.0.0.1:${PORT}`}`;
+    bucket.res.add(res);
+    recordDiagnostic("device-connected", { deviceId: id, name });
+    broadcast(room(null));
+    if (party.on) writeSse(res, room({ type: "PARTY", party: partyPublic() }));
+    res.on("close", () => {
+      clearInterval(keepalive);
+      bucket.res.delete(res);
+      if (!bucket.res.size) {
+        recordDiagnostic("device-disconnected", { deviceId: id });
+        devices.delete(id);
+        if (activeId === id) {
+          activeId = "";
+          activeTrackId = "";
+          playbackState.delete(id);
+        }
+        broadcast(room(null));
+      }
+    });
+    return;
+  }
+  if (req.method === "POST") {
+    onPost(req, res, url);
+    return;
+  }
+  sendJson(res, 404, { ok: false, error: "Not found" });
+});
+
+function ipv4Number(address) {
+  return address.split(".").reduce((value, part) => ((value << 8) | Number(part)) >>> 0, 0);
+}
+
+function addressForClient(remoteAddress) {
+  const client = ipv4Number(remoteAddress);
+  const addresses = Object.values(networkInterfaces()).flatMap((entries) => entries || []);
+  const ipv4 = addresses.filter((item) => (item.family === "IPv4" || item.family === 4) && !item.internal);
+  const match = ipv4.find(
+    (item) => (ipv4Number(item.address) & ipv4Number(item.netmask)) === (client & ipv4Number(item.netmask)),
+  );
+  return match?.address || ipv4[0]?.address || "";
+}
+
+const discovery = createSocket("udp4");
+discovery.on("message", (message, remote) => {
+  if (message.toString() !== "PETRIFY_DISCOVER_V1") return;
+  const host = addressForClient(remote.address);
+  if (!host) return;
+  const response = Buffer.from(`PETRIFY_SERVICE_V1|${host}|${PORT}|${PLAYER_PORT}`);
+  discovery.send(response, remote.port, remote.address);
+});
+discovery.on("error", (error) => {
+  console.error(`LAN discovery failed on UDP ${DISCOVERY_PORT}: ${error.message}`);
+});
+discovery.bind(DISCOVERY_PORT, "0.0.0.0");
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Petrify service listening on http://0.0.0.0:${PORT}`);
+  console.log(`LAN discovery listening on UDP ${DISCOVERY_PORT}`);
+});
