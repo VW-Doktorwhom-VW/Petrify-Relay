@@ -38,6 +38,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
             string nodePath = Path.Combine(dataDir, "node");
             string scriptPath = Path.Combine(dataDir, "server.mjs");
 
+            // Always overwrite resources on startup
             ExtractEmbeddedResource("Jellyfin.Plugin.Petrify.Resources.node", nodePath);
             ExtractEmbeddedResource("Jellyfin.Plugin.Petrify.Resources.server.mjs", scriptPath);
 

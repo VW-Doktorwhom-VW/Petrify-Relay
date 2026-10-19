@@ -8,11 +8,11 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.0.1.0",
+        "version": "1.0.2.0",
         "changelog": "Force overwrite extracted server.mjs resource on startup.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "bc9667172eb646fa684d57d2a9fc9ed9"
+        "checksum": ""
       }
     ]
   }
