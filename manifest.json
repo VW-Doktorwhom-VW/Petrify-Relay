@@ -13,13 +13,6 @@
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
         "checksum": "a263a7e96652f43fd1049c3eed6c69cf"
-      },
-      {
-        "version": "1.0.3.0",
-        "changelog": "Updated relay: party mode stop silences every device except the host, full library paging. Node shipped compressed, relay output drained, configurable port.",
-        "targetAbi": "10.10.0.0",
-        "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "f35a6bb60023ba76f687313b43b1e9db"
       }
     ]
   }
