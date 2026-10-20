@@ -446,7 +446,9 @@ function broadcast(data, only) {
 // (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
 // Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
 //   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
-const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 700));
+const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 1000));
+// A new track needs a fresh stream on every member, so track changes get a longer runway.
+const PARTY_TRACK_LEAD_MS = Math.max(800, Number(process.env.PETRIFY_PARTY_TRACK_LEAD_MS || 2200));
 const party = {
   on: false,
   rev: 0,
@@ -483,6 +485,7 @@ function partyPublic() {
     ...party,
     serverNow,
     leadMs: PARTY_LEAD_MS,
+    trackLeadMs: PARTY_TRACK_LEAD_MS,
     // Explicit presentation time stamp of the shared timeline (same data as anchorPos/anchorAt).
     pts: { trackId: party.trackId, position: party.anchorPos, at: party.anchorAt, playing: party.playing },
     stats,
@@ -506,7 +509,7 @@ function partyBroadcast() {
   broadcast({ ...room({ type: "PARTY", party: partyPublic() }) });
 }
 
-function partyGo(index, lead = 1200) {
+function partyGo(index, lead = PARTY_TRACK_LEAD_MS) {
   const ids = party.queue.length ? party.queue : party.mediaQueue.map((item) => item.id);
   if (!ids.length) return;
   if (index >= ids.length) {
@@ -536,8 +539,8 @@ function schedulePartyAdvance() {
     if (!party.on || !party.playing) return;
     if (party.repeat === "one") {
       party.anchorPos = 0;
-      party.anchorAt = hrNow() + 600;
-    } else partyGo(party.index + 1, 600);
+      party.anchorAt = hrNow() + PARTY_TRACK_LEAD_MS;
+    } else partyGo(party.index + 1);
     recordDiagnostic("party-advanced", { trackId: party.trackId });
     partyBroadcast();
   }, Math.max(250, left + 150));
@@ -575,7 +578,7 @@ function partyAction(body) {
     party.index = Math.max(0, party.queue.indexOf(trackId));
     party.trackId = party.queue[party.index] || trackId;
     party.anchorPos = Math.max(0, Number(body.position || 0));
-    party.anchorAt = now + 1500;
+    party.anchorAt = now + PARTY_TRACK_LEAD_MS;
     party.playing = body.playing !== false && Boolean(party.trackId);
     if (body.repeat) party.repeat = String(body.repeat);
     return true;
@@ -622,7 +625,7 @@ function partyAction(body) {
   if (action === "prev") {
     if (body.restart !== false && partyPosition(now) > 3) {
       party.anchorPos = 0;
-      party.anchorAt = now + 700;
+      party.anchorAt = now + PARTY_TRACK_LEAD_MS;
       party.playing = true;
     } else partyGo(Math.max(0, party.index - 1));
     return true;
@@ -631,7 +634,7 @@ function partyAction(body) {
     if (String(body.trackId || "") !== party.trackId || !party.playing) return false;
     const secs = Number(partyTrack()?.secs || 0);
     if (secs > 1 && partyPosition(now) < secs - 4) return false;
-    partyGo(party.index + 1, 600);
+    partyGo(party.index + 1);
     return true;
   }
   if (action === "repeat") {
@@ -668,10 +671,20 @@ function partyAction(body) {
     // Followers report how far they are from the timeline; shown in the party panel. No broadcast.
     const id = String(body.deviceId || "").slice(0, 64);
     if (id) {
+      const num = (value) => (Number.isFinite(Number(value)) ? Math.round(Number(value) * 10) / 10 : null);
       partyStats.set(id, {
-        drift: Math.round(Number(body.drift || 0) * 10) / 10,
-        rtt: Math.round(Number(body.rtt || 0) * 10) / 10,
+        drift: num(body.drift) ?? 0,
+        rtt: num(body.rtt) ?? 0,
         status: String(body.status || "").slice(0, 60),
+        state: String(body.state || "").slice(0, 20),
+        rate: num(body.rate),
+        offset: num(body.offset),
+        position: num(body.position),
+        buffered: num(body.buffered),
+        latency: num(body.latency),
+        trackId: String(body.trackId || "").slice(0, 80),
+        platform: String(body.platform || "").slice(0, 20),
+        resyncs: Number(body.resyncs || 0) || 0,
         at: hrNow(),
       });
     }

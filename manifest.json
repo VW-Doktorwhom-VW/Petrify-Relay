@@ -8,11 +8,11 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.0.6.0",
-        "changelog": "Party: participant selection, PTS timeline block, sync reports, configurable start lead.",
+        "version": "1.0.7.0",
+        "changelog": "Party: longer track-change lead, richer per-device sync reports.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "14cba7ed0438661ced974533bfb4a378"
+        "checksum": "cffb33d097be5ee11d7a522236461fc9"
       }
     ]
   }
