@@ -446,6 +446,7 @@ function broadcast(data, only) {
 // (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
 // Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
 //   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
+const RELAY_VERSION = "1.0.7";
 const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 1000));
 // A new track needs a fresh stream on every member, so track changes get a longer runway.
 const PARTY_TRACK_LEAD_MS = Math.max(800, Number(process.env.PETRIFY_PARTY_TRACK_LEAD_MS || 2200));
@@ -1205,7 +1206,7 @@ const server = createServer((req, res) => {
     return;
   }
   if (req.method === "GET" && url.pathname === "/v1/health") {
-    sendJson(res, 200, { ok: true, service: "petrify", connectProtocol: 7, party: party.on, devices: listDevices() });
+    sendJson(res, 200, { ok: true, service: "petrify", version: RELAY_VERSION, connectProtocol: 7, party: party.on, devices: listDevices() });
     return;
   }
   if (req.method === "GET" && url.pathname === "/v1/time") {

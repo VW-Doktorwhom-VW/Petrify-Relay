@@ -8,6 +8,14 @@
     "category": "General",
     "versions": [
       {
+        "version": "1.0.8.0",
+        "changelog": "Party: relay version in health check, track-change lead, richer per-device sync stats.",
+        "targetAbi": "10.10.0.0",
+        "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
+        "checksum": "c755869176a10fd468e373a3be820b80",
+        "timestamp": "2026-10-20T17:44:31Z"
+      },
+      {
         "version": "1.0.7.0",
         "changelog": "Party: longer track-change lead, richer per-device sync reports.",
         "targetAbi": "10.10.0.0",
