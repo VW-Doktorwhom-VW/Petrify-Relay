@@ -8,11 +8,11 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.0.5.0",
-        "changelog": "Relay talks to Jellyfin directly on the same machine instead of through the public URL (much faster images, playback start and party sync).",
+        "version": "1.0.6.0",
+        "changelog": "Party: participant selection, PTS timeline block, sync reports, configurable start lead.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "9b35f52d300d6a7ed51baabbbaf76691"
+        "checksum": "14cba7ed0438661ced974533bfb4a378"
       }
     ]
   }

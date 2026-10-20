@@ -437,11 +437,22 @@ function broadcast(data, only) {
   }
 }
 
-// Party mode: the service owns one shared timeline and every device follows it.
+// Party mode: the service owns one shared timeline and every member device follows it.
+//
+// Timeline model (all times are the service's wall clock in ms, see hrNow):
+//   PTS: the media position `anchorPos` (seconds) is presented at server time `anchorAt`.
+//   While playing, the frame due at server time T is  anchorPos + (T - anchorAt) / 1000.
+// Every change (start, seek, play, next...) sets anchorAt a little in the future
+// (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
+// Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
+//   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
+const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 700));
 const party = {
   on: false,
   rev: 0,
   host: "",
+  // Participating device ids. Empty means every connected device follows the party.
+  members: [],
   mediaQueue: [],
   queue: [],
   index: 0,
@@ -451,6 +462,8 @@ const party = {
   playing: false,
   repeat: "off",
 };
+// Latest sync report per device: { drift, rtt, status, at } (ms). Not part of rev.
+const partyStats = new Map();
 let partyTimer = null;
 
 function partyPosition(now = hrNow()) {
@@ -463,7 +476,28 @@ function partyTrack(id = party.trackId) {
 }
 
 function partyPublic() {
-  return { ...party, serverNow: hrNow() };
+  const serverNow = hrNow();
+  const stats = {};
+  for (const [id, item] of partyStats) if (serverNow - item.at < 30000) stats[id] = item;
+  return {
+    ...party,
+    serverNow,
+    leadMs: PARTY_LEAD_MS,
+    // Explicit presentation time stamp of the shared timeline (same data as anchorPos/anchorAt).
+    pts: { trackId: party.trackId, position: party.anchorPos, at: party.anchorAt, playing: party.playing },
+    stats,
+  };
+}
+
+function partyMember(id) {
+  return !party.members.length || party.members.includes(id);
+}
+
+function cleanMembers(raw, host) {
+  if (!Array.isArray(raw)) return [];
+  const ids = [...new Set(raw.map((id) => String(id || "").slice(0, 64)).filter(Boolean))].slice(0, 64);
+  if (ids.length && host && !ids.includes(host)) ids.unshift(host);
+  return ids;
 }
 
 function partyBroadcast() {
@@ -533,6 +567,8 @@ function partyAction(body) {
     if (action === "start") {
       // A repeated start keeps the original host: the device that switched the party on.
       if (!party.on || !party.host) party.host = String(body.deviceId || "").slice(0, 64);
+      if (!party.on || Array.isArray(body.members)) party.members = cleanMembers(body.members, party.host);
+      partyStats.clear();
       party.on = true;
     }
     const trackId = String(body.trackId || party.trackId || party.queue[0] || "");
@@ -555,8 +591,9 @@ function partyAction(body) {
     clearTimeout(partyTimer);
     // Sent after the "party off" broadcast, so followers no longer treat it as a stray party STOP.
     const host = party.host;
+    const members = party.members.slice();
     setTimeout(() => {
-      for (const id of devices.keys()) if (id !== host) stopDevice(id);
+      for (const id of devices.keys()) if (id !== host && (!members.length || members.includes(id))) stopDevice(id);
     }, 300);
     if (party.host && devices.has(party.host)) {
       activeId = party.host;
@@ -569,13 +606,13 @@ function partyAction(body) {
     const pos = partyPosition(now);
     const play = action === "toggle" ? !party.playing : action === "play";
     party.anchorPos = pos;
-    party.anchorAt = now + (play ? 700 : 0);
+    party.anchorAt = now + (play ? PARTY_LEAD_MS : 0);
     party.playing = play;
     return true;
   }
   if (action === "seek") {
     party.anchorPos = Math.max(0, Number(body.position || 0));
-    party.anchorAt = now + (party.playing ? 700 : 0);
+    party.anchorAt = now + (party.playing ? PARTY_LEAD_MS : 0);
     return true;
   }
   if (action === "next") {
@@ -600,6 +637,45 @@ function partyAction(body) {
   if (action === "repeat") {
     party.repeat = ["off", "all", "one"].includes(String(body.repeat)) ? String(body.repeat) : "off";
     return true;
+  }
+  if (action === "members") {
+    // Pick participants. Devices dropped from the list go quiet; the host always stays in.
+    const before = party.members.length ? party.members.slice() : [...devices.keys()];
+    party.members = cleanMembers(body.members, party.host);
+    if (party.members.length) {
+      setTimeout(() => {
+        for (const id of before) if (id !== party.host && !party.members.includes(id)) stopDevice(id);
+      }, 300);
+    }
+    return true;
+  }
+  if (action === "join" || action === "leave") {
+    const id = String(body.target || body.deviceId || "").slice(0, 64);
+    if (!id) return false;
+    const list = party.members.length ? party.members.slice() : [...devices.keys()];
+    if (action === "join") {
+      if (list.includes(id)) return false;
+      list.push(id);
+    } else {
+      if (id === party.host || !list.includes(id)) return false;
+      list.splice(list.indexOf(id), 1);
+      setTimeout(() => stopDevice(id), 300);
+    }
+    party.members = cleanMembers(list, party.host);
+    return true;
+  }
+  if (action === "report") {
+    // Followers report how far they are from the timeline; shown in the party panel. No broadcast.
+    const id = String(body.deviceId || "").slice(0, 64);
+    if (id) {
+      partyStats.set(id, {
+        drift: Math.round(Number(body.drift || 0) * 10) / 10,
+        rtt: Math.round(Number(body.rtt || 0) * 10) / 10,
+        status: String(body.status || "").slice(0, 60),
+        at: hrNow(),
+      });
+    }
+    return false;
   }
   return false;
 }
@@ -827,6 +903,10 @@ async function onPost(req, res, url) {
   }
   if (url.pathname === "/v1/party") {
     const changed = partyAction(body);
+    if (body.action === "report") {
+      sendJson(res, 200, { ok: true, rev: party.rev, on: party.on, serverNow: hrNow() });
+      return;
+    }
     if (changed) {
       recordDiagnostic("party-" + String(body.action || "update"), {
         deviceId: String(body.deviceId || ""),
