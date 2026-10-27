@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.2.1.0",
-        "changelog": "Relay 1.2.1: independent Voting mode keeps playback on the host while connected devices vote; explicit rejected-action errors and health capabilities. Improved plugin settings explain relay behavior and data handling, validate TCP/UDP ports and local Jellyfin URLs, configure party lead times, and offer an explicit credential-free health summary. Settings require a Jellyfin restart.",
+        "version": "1.2.2.0",
+        "changelog": "Relay 1.2.2: every connected device can vote in Party or Voting mode; any connected device can start or stop a shared session, and a device can leave playback or pause voting only for itself. Host handoff keeps the party alive when its current host leaves. Voting capabilities are reported in health and the client shows per-song device counts.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/VW-Doktorwhom-VW/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "049ac3c54e2018446eb3c00d9d34f4e4",
-        "timestamp": "2026-10-27T19:28:33Z"
+        "checksum": "4572772112889f65d0315df52daefaee",
+        "timestamp": "2026-10-27T20:49:52Z"
       }
     ]
   }

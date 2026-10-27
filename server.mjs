@@ -463,7 +463,7 @@ function broadcast(data, only) {
 // (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
 // Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
 //   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
-const RELAY_VERSION = "1.2.1";
+const RELAY_VERSION = "1.2.2";
 const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 1000));
 // A new track needs a fresh stream on every member, so track changes get a longer runway.
 const PARTY_TRACK_LEAD_MS = Math.max(800, Number(process.env.PETRIFY_PARTY_TRACK_LEAD_MS || 2200));
@@ -478,6 +478,7 @@ const party = {
   mediaQueue: [],
   queue: [],
   queueVotes: {},
+  voterOptOut: [],
   zones: {},
   zoneStates: {},
   index: 0,
@@ -574,14 +575,13 @@ function sortPartyQueue() {
   party.index = Math.max(0, party.queue.indexOf(party.trackId));
 }
 
-/** Number of party devices that may vote (members, or every connected device when the list is empty). */
+/** Every device connected to this relay instance may vote, whether or not it follows playback. */
 function partyVoterCount() {
-  if (party.mode === "voting") return new Set([...devices.keys(), party.host].filter(Boolean)).size;
-  return party.members.length ? party.members.length : devices.size;
+  return [...devices.keys()].filter((id) => !party.voterOptOut.includes(id)).length;
 }
 
 function partyVoter(id) {
-  return Boolean(id) && (party.mode === "voting" ? id === party.host || devices.has(id) : partyMember(id));
+  return Boolean(id) && devices.has(id) && !party.voterOptOut.includes(id);
 }
 
 function partyMember(id) {
@@ -899,22 +899,32 @@ function partyAction(body, zoneAuthorized = false) {
   }
   const now = hrNow();
   if (action === "start" || action === "load") {
+    if (action === "start" && !devices.has(requester)) return false;
     if (action === "load" && requester !== party.host) return false;
-    if (action === "start" && party.on && requester !== party.host) return false;
+    const requestedMode = body.mode === "voting" ? "voting" : "sync";
+    if (action === "start" && party.on && requester !== party.host && requestedMode === party.mode) {
+      if (party.mode === "sync") {
+        const members = party.members.length ? party.members.slice() : [...devices.keys()];
+        if (!members.includes(requester)) members.push(requester);
+        party.members = cleanMembers(members, party.host);
+        party.roles = { ...(party.roles || {}), [requester]: "GUEST" };
+      }
+      return true;
+    }
     const mediaQueue = cleanMediaQueue(body.mediaQueue);
     if (mediaQueue.length) party.mediaQueue = mediaQueue;
     const queue = Array.isArray(body.queue) ? body.queue.map(String).slice(0, 2000) : [];
     party.queue = queue.length ? queue : party.mediaQueue.map((item) => item.id);
     if (action === "start") {
-      // A repeated start keeps the original host: the device that switched the party on.
-      if (!party.on || !party.host) party.host = String(body.deviceId || "").slice(0, 64);
-      party.mode = body.mode === "voting" ? "voting" : "sync";
+      if (!party.on || !party.host || requester !== party.host) party.host = requester;
+      party.mode = requestedMode;
       if (party.mode === "voting") party.members = [party.host];
-      else if (!party.on || Array.isArray(body.members)) party.members = cleanMembers(body.members, party.host);
+      else party.members = cleanMembers(body.members, party.host);
       party.roles = Object.fromEntries([...new Set([...party.members, ...devices.keys(), party.host])].filter(Boolean).map((id) => [id, id === party.host ? "HOST" : "GUEST"]));
       partyStats.clear();
       party.zoneStates = {};
       party.on = true;
+      party.voterOptOut = [];
     }
     const trackId = String(body.trackId || party.trackId || party.queue[0] || "");
     if (action === "start") party.queueVotes = {};
@@ -978,6 +988,12 @@ function partyAction(body, zoneAuthorized = false) {
     return false;
   }
   if (!party.on) return false;
+  if (action === "voter-opt-out" || action === "voter-opt-in") {
+    if (!devices.has(requester)) return false;
+    party.voterOptOut = party.voterOptOut.filter((id) => id !== requester);
+    if (action === "voter-opt-out") party.voterOptOut.push(requester);
+    return true;
+  }
   if (action === "vote") {
     const trackId = String(body.trackId || "");
     const userId = requester;
@@ -1014,7 +1030,49 @@ function partyAction(body, zoneAuthorized = false) {
     party.roles = nextRoles;
     return true;
   }
-  if (requester !== party.host && !(action === "ended" && zoneAuthorized)) return false;
+  if (action === "join" || action === "leave") {
+    const id = String(body.target || body.deviceId || "").slice(0, 64);
+    if (!devices.has(requester) || !id || !devices.has(id) || (id !== requester && requester !== party.host)) return false;
+    const list = party.members.length ? party.members.slice() : [...devices.keys()];
+    if (action === "join") {
+      if (list.includes(id)) return false;
+      list.push(id);
+      party.members = cleanMembers(list, party.host);
+      party.roles = { ...(party.roles || {}), [id]: "GUEST" };
+      return true;
+    }
+    if (!list.includes(id)) return false;
+    const remaining = list.filter((member) => member !== id);
+    if (id === party.host) {
+      const eligible = party.mode === "voting"
+        ? [...devices.keys()].filter((member) => member !== id)
+        : remaining;
+      const successor = eligible.find((member) => devices.has(member));
+      if (!successor) {
+        const wasPlaying = party.playing;
+        const oldMembers = remaining.slice();
+        party.anchorPos = partyPosition(now);
+        party.anchorAt = now;
+        party.on = false;
+        party.host = "";
+        party.members = [];
+        party.playing = wasPlaying;
+        partyInvites.clear();
+        clearTimeout(partyTimer);
+        setTimeout(() => {
+          for (const deviceId of new Set([...oldMembers, id])) stopDevice(deviceId);
+        }, 300);
+        return true;
+      }
+      party.host = successor;
+      if (party.mode === "voting") remaining.splice(0, remaining.length, successor);
+    }
+    party.members = cleanMembers(remaining, party.host);
+    party.roles = { ...(party.roles || {}), [id]: "GUEST", [party.host]: "HOST" };
+    setTimeout(() => stopDevice(id), 300);
+    return true;
+  }
+  if (requester !== party.host && !(action === "ended" && zoneAuthorized) && action !== "stop") return false;
   if (action === "remove") {
     const trackId = String(body.trackId || "");
     if (!trackId || trackId === party.trackId || !party.queue.includes(trackId)) return false;
@@ -1043,6 +1101,7 @@ function partyAction(body, zoneAuthorized = false) {
     return true;
   }
   if (action === "stop") {
+    if (!devices.has(requester)) return false;
     // Freeze the shared timeline: the host carries on from exactly here, everyone else stops.
     const wasPlaying = party.playing;
     party.anchorPos = partyPosition(now);
@@ -1111,21 +1170,6 @@ function partyAction(body, zoneAuthorized = false) {
         for (const id of before) if (id !== party.host && !party.members.includes(id)) stopDevice(id);
       }, 300);
     }
-    return true;
-  }
-  if (action === "join" || action === "leave") {
-    const id = String(body.target || body.deviceId || "").slice(0, 64);
-    if (!id) return false;
-    const list = party.members.length ? party.members.slice() : [...devices.keys()];
-    if (action === "join") {
-      if (list.includes(id)) return false;
-      list.push(id);
-    } else {
-      if (id === party.host || !list.includes(id)) return false;
-      list.splice(list.indexOf(id), 1);
-      setTimeout(() => stopDevice(id), 300);
-    }
-    party.members = cleanMembers(list, party.host);
     return true;
   }
   return false;
@@ -1468,7 +1512,9 @@ async function onPost(req, res, url) {
         : hostOnly && requester !== party.host
           ? "Only the host can move, remove or play queued songs."
           : body.action === "vote" && !partyVoter(requester)
-            ? "Join this party before voting."
+            ? party.voterOptOut.includes(requester)
+              ? "Voting is paused on this device. Re-enable it in the Voting tab."
+              : "Connect this device to the same Petrify service before voting."
             : body.trackId === party.trackId
               ? "The currently playing song cannot be voted on or moved."
               : "The queue changed or this action has already been applied. Refresh and try again.";
