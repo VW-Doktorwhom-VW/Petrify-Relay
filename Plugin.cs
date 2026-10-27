@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
+using System.Globalization;
 using Jellyfin.Plugin.Petrify.Configuration;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
@@ -17,7 +18,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
     public override string Name => "Petrify";
     public override Guid Id => Guid.Parse("a8c9038d-19df-4122-a9bd-831e3d09e8f4");
-    public override string Description => "Self-contained network relay service for Petrify clients.";
+    public override string Description => "Runs the Petrify network relay for device discovery, playback handoff, synchronized parties and Jellyfin media proxying.";
 
     public static Plugin? Instance { get; private set; }
     private static Process? _nodeProcess;
@@ -33,6 +34,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     {
         try
         {
+            Configuration.Validate();
             var dataDir = DataFolderPath;
             Directory.CreateDirectory(dataDir);
 
@@ -66,8 +68,12 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
                 RedirectStandardError = true
             };
             startInfo.ArgumentList.Add(scriptPath);
-            var port = Configuration.ServerPort;
-            if (!string.IsNullOrWhiteSpace(port)) startInfo.Environment["PETRIFY_PORT"] = port.Trim();
+            startInfo.Environment["PETRIFY_PORT"] = Configuration.ServerPort.Trim();
+            startInfo.Environment["PETRIFY_DISCOVERY_PORT"] = Configuration.DiscoveryPort.Trim();
+            startInfo.Environment["PETRIFY_LOCAL_JELLYFIN"] = string.Join(",",
+                Configuration.LocalJellyfin.Split(',').Select(address => address.Trim().TrimEnd('/')));
+            startInfo.Environment["PETRIFY_PARTY_LEAD_MS"] = Configuration.PartyLeadMs.ToString(CultureInfo.InvariantCulture);
+            startInfo.Environment["PETRIFY_PARTY_TRACK_LEAD_MS"] = Configuration.PartyTrackLeadMs.ToString(CultureInfo.InvariantCulture);
 
             _nodeProcess = new Process { StartInfo = startInfo };
             // The output pipes must be drained, otherwise node blocks once they fill up and the relay freezes.
@@ -81,6 +87,14 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         {
             Console.WriteLine($"[Petrify Plugin Error] {ex.Message}");
         }
+    }
+
+    public override void UpdateConfiguration(BasePluginConfiguration configuration)
+    {
+        if (configuration is not PluginConfiguration settings)
+            throw new ArgumentException("Invalid Petrify configuration.", nameof(configuration));
+        settings.Validate();
+        base.UpdateConfiguration(configuration);
     }
 
     private void ExtractEmbeddedResource(string resourceName, string outputPath, bool gzip = false)

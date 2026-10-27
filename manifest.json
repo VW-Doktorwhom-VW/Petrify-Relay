@@ -2,18 +2,18 @@
   {
     "guid": "a8c9038d-19df-4122-a9bd-831e3d09e8f4",
     "name": "Petrify",
-    "description": "Auto-extracting network relay plugin.",
-    "overview": "Runs Node relay automatically inside Jellyfin.",
+    "description": "Petrify device discovery, playback handoff and listening-party relay.",
+    "overview": "Runs the bundled Petrify relay with Jellyfin, with validated network and party timing settings and an optional browser health check.",
     "owner": "VW-Doktorwhom-VW",
     "category": "General",
     "versions": [
       {
-        "version": "1.2.0.0",
-        "changelog": "Relay 1.2.0: democratic voting queue (most-voted song plays next, vote counts, new round each song), host/guest roles, guest web page at /party/<id>, zones and per-device latency offset, full-screen reactions to host.",
+        "version": "1.2.1.0",
+        "changelog": "Relay 1.2.1: independent Voting mode keeps playback on the host while connected devices vote; explicit rejected-action errors and health capabilities. Improved plugin settings explain relay behavior and data handling, validate TCP/UDP ports and local Jellyfin URLs, configure party lead times, and offer an explicit credential-free health summary. Settings require a Jellyfin restart.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/VW-Doktorwhom-VW/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "5c8e89a7b5ff4ee2e8d6dfe179fbd24f",
-        "timestamp": "2026-10-27T18:56:46Z"
+        "checksum": "049ac3c54e2018446eb3c00d9d34f4e4",
+        "timestamp": "2026-10-27T19:28:33Z"
       }
     ]
   }

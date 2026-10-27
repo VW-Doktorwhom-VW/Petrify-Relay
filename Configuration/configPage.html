@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -9,39 +9,171 @@
         <div data-role="content">
             <div class="content-primary">
                 <h2>Petrify relay</h2>
-                <p>The Petrify relay starts automatically with Jellyfin. Petrify apps find it on your network, or you can enter this server's address and port manually.</p>
+                <p>Plugin 1.2.1.0 starts a bundled relay process with Jellyfin. It lets Petrify apps discover this server on the LAN, see connected Petrify devices, hand off playback and coordinate synchronized listening parties and guest voting. It also proxies Jellyfin artwork and audio requested by clients.</p>
+                <h3>What it checks and handles</h3>
+                <ul>
+                    <li>LAN discovery answers Petrify discovery packets; device connections report presence and playback state. Device counts refer to relay-connected Petrify clients, not every Jellyfin session.</li>
+                    <li>For faster media access, the relay compares Jellyfin's public server ID at the client-supplied server address with local candidate addresses. A matching ID allows a local route; this does not change library permissions.</li>
+                    <li>Client media requests can carry Jellyfin access tokens, and party features handle playback, queue and guest-invite data. Treat the relay as a trusted-network service, not an authenticated public administration API.</li>
+                    <li>The optional check below requests only the relay's health endpoint. It displays its reported version, protocol, connected-device count and party on/off state, never credentials, invite links or raw responses. It does not scan your library, test UDP discovery or verify audio synchronization.</li>
+                </ul>
+                <p><strong>All saved settings require a Jellyfin restart.</strong> Saving does not restart the relay or change its running ports. No health requests run automatically.</p>
                 <form id="PetrifyConfigForm">
+                    <h3>Network</h3>
                     <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="ServerPort">Relay port</label>
-                        <input id="ServerPort" name="ServerPort" type="number" is="emby-input" min="1" max="65535" />
-                        <div class="fieldDescription">Default 8787. Restart Jellyfin after changing it.</div>
+                        <label class="inputLabel inputLabelUnfocused" for="ServerPort">Relay HTTP port</label>
+                        <input id="ServerPort" name="ServerPort" type="number" is="emby-input" min="1" max="65535" step="1" required />
+                        <div class="fieldDescription">Default 8787 (TCP). Used by Petrify apps for connections and media requests. Choose an unused port and allow it through your LAN firewall.</div>
                     </div>
-                    <div>
-                        <button is="emby-button" type="submit" class="raised button-submit block emby-button"><span>Save</span></button>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="DiscoveryPort">LAN discovery UDP port</label>
+                        <input id="DiscoveryPort" name="DiscoveryPort" type="number" is="emby-input" min="1" max="65535" step="1" required />
+                        <div class="fieldDescription">Default 8788 (UDP). Apps must discover on the same port; changing this can break automatic discovery. Manual relay addresses still work. TCP and UDP may use the same port number.</div>
                     </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="LocalJellyfin">Local Jellyfin base URLs</label>
+                        <input id="LocalJellyfin" name="LocalJellyfin" type="text" is="emby-input" required />
+                        <div class="fieldDescription">Comma-separated HTTP(S) base URLs reachable from the relay process, including any Jellyfin base path. Default: http://127.0.0.1:8096,http://localhost:8096. In containers, localhost means the container. No passwords, API keys, queries or fragments. The relay may also try Jellyfin's advertised local address; this list is not an access-control allowlist.</div>
+                    </div>
+                    <h3>Party timing</h3>
+                    <p>Lead times schedule playback ahead so devices can prepare. Increase cautiously for slower networks; higher values also make controls feel slower. These do not replace per-device synchronization adjustments in Petrify.</p>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="PartyLeadMs">Party command lead (milliseconds)</label>
+                        <input id="PartyLeadMs" name="PartyLeadMs" type="number" is="emby-input" min="300" max="30000" step="1" required />
+                        <div class="fieldDescription">Default 1000; allowed 300–30000. Preparation time for synchronized party playback commands.</div>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="PartyTrackLeadMs">Party track-change lead (milliseconds)</label>
+                        <input id="PartyTrackLeadMs" name="PartyTrackLeadMs" type="number" is="emby-input" min="800" max="30000" step="1" required />
+                        <div class="fieldDescription">Default 2200; allowed 800–30000. Extra preparation time when a party loads a different track.</div>
+                    </div>
+                    <p id="PetrifySaveStatus" role="status" aria-live="polite"></p>
+                    <button id="PetrifySave" is="emby-button" type="submit" class="raised button-submit block emby-button" disabled><span>Save settings</span></button>
                 </form>
+                <h3>Check running relay</h3>
+                <p>This browser connects only when you press the button. Use the currently running relay address, not an unsaved or not-yet-restarted port. The suggested address uses this Jellyfin browser session's hostname, which may differ from your relay address.</p>
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="PetrifyCheckUrl">Relay base URL to check</label>
+                    <input id="PetrifyCheckUrl" type="url" is="emby-input" />
+                    <div class="fieldDescription">Use a trusted HTTP(S) relay address without credentials or query parameters. For HTTPS dashboards, use an HTTPS reverse proxy for the relay: browsers may block insecure HTTP, private-network access or cross-origin requests.</div>
+                </div>
+                <button id="PetrifyCheck" is="emby-button" type="button" class="raised emby-button"><span>Check relay now</span></button>
+                <p id="PetrifyHealthStatus" role="status" aria-live="polite">Not checked. No request has been sent.</p>
+                <p>Protect remote access with your network or reverse proxy. This page does not open firewall ports, enable TLS, add authentication or change Jellyfin users. A failed browser check alone does not mean the relay is down; check Jellyfin's Petrify logs and your network configuration.</p>
             </div>
         </div>
         <script type="text/javascript">
-            var PetrifyConfig = { pluginUniqueId: 'a8c9038d-19df-4122-a9bd-831e3d09e8f4' };
-            document.querySelector('#PetrifyConfigPage').addEventListener('pageshow', function () {
-                Dashboard.showLoadingMsg();
-                ApiClient.getPluginConfiguration(PetrifyConfig.pluginUniqueId).then(function (config) {
-                    document.querySelector('#ServerPort').value = config.ServerPort || '8787';
-                    Dashboard.hideLoadingMsg();
+            (function () {
+                var pluginId = 'a8c9038d-19df-4122-a9bd-831e3d09e8f4';
+                var page = document.querySelector('#PetrifyConfigPage');
+                var loaded = false;
+                var fields = ['ServerPort', 'DiscoveryPort', 'LocalJellyfin', 'PartyLeadMs', 'PartyTrackLeadMs'];
+                var defaults = ['8787', '8788', 'http://127.0.0.1:8096,http://localhost:8096', 1000, 2200];
+                function field(id) { return page.querySelector('#' + id); }
+                function baseUrl(value) {
+                    var url = new URL(value.trim());
+                    if (!/^https?:$/.test(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) {
+                        throw new Error('Use HTTP(S) base URLs without credentials, query parameters or fragments.');
+                    }
+                    return url.href.replace(/\/+$/, '');
+                }
+                function values() {
+                    var result = {};
+                    fields.forEach(function (id, index) {
+                        var input = field(id);
+                        var value = input.value.trim();
+                        if (id === 'LocalJellyfin') {
+                            if (!value) throw new Error('Enter at least one local Jellyfin base URL.');
+                            result[id] = value.split(',').map(baseUrl).join(',');
+                        } else {
+                            var number = Number(value);
+                            if (!/^\d+$/.test(value) || !Number.isInteger(number) || number < Number(input.min) || number > Number(input.max)) {
+                                throw new Error(id + ' must be a whole number between ' + input.min + ' and ' + input.max + '.');
+                            }
+                            result[id] = index < 2 ? String(number) : number;
+                        }
+                    });
+                    return result;
+                }
+                page.addEventListener('pageshow', function () {
+                    loaded = false;
+                    field('PetrifySave').disabled = true;
+                    field('PetrifySaveStatus').textContent = 'Loading saved settings…';
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        fields.forEach(function (id, index) {
+                            field(id).value = config[id] == null ? defaults[index] : config[id];
+                        });
+                        if (!field('PetrifyCheckUrl').value) {
+                            var suggested = new URL(window.location.href);
+                            suggested.protocol = 'http:';
+                            suggested.port = String(config.ServerPort || defaults[0]);
+                            suggested.pathname = '/';
+                            suggested.search = '';
+                            suggested.hash = '';
+                            suggested.username = '';
+                            suggested.password = '';
+                            field('PetrifyCheckUrl').value = suggested.href;
+                        }
+                        loaded = true;
+                        field('PetrifySave').disabled = false;
+                        field('PetrifySaveStatus').textContent = 'Saved settings loaded. Changes apply after restarting Jellyfin.';
+                    }).catch(function () {
+                        field('PetrifySaveStatus').textContent = 'Could not load settings. Reopen this page to retry; saving is disabled to avoid overwriting your configuration.';
+                    }).finally(function () { Dashboard.hideLoadingMsg(); });
                 });
-            });
-            document.querySelector('#PetrifyConfigForm').addEventListener('submit', function (e) {
-                Dashboard.showLoadingMsg();
-                ApiClient.getPluginConfiguration(PetrifyConfig.pluginUniqueId).then(function (config) {
-                    config.ServerPort = document.querySelector('#ServerPort').value || '8787';
-                    ApiClient.updatePluginConfiguration(PetrifyConfig.pluginUniqueId, config).then(function (result) {
+                field('PetrifyConfigForm').addEventListener('submit', function (event) {
+                    event.preventDefault();
+                    if (!loaded || field('PetrifySave').disabled) return;
+                    var settings;
+                    try { settings = values(); } catch (error) {
+                        field('PetrifySaveStatus').textContent = error.message;
+                        return;
+                    }
+                    field('PetrifySave').disabled = true;
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        fields.forEach(function (id) { config[id] = settings[id]; });
+                        return ApiClient.updatePluginConfiguration(pluginId, config);
+                    }).then(function (result) {
                         Dashboard.processPluginConfigurationUpdateResult(result);
+                        field('PetrifySaveStatus').textContent = 'Settings saved. Restart Jellyfin to apply them; the relay is still using its previous settings.';
+                    }).catch(function () {
+                        field('PetrifySaveStatus').textContent = 'Settings could not be saved. Check your values and Jellyfin connection, then retry.';
+                    }).finally(function () {
+                        field('PetrifySave').disabled = false;
+                        Dashboard.hideLoadingMsg();
                     });
                 });
-                e.preventDefault();
-                return false;
-            });
+                field('PetrifyCheck').addEventListener('click', function () {
+                    var address;
+                    try { address = baseUrl(field('PetrifyCheckUrl').value); } catch (error) {
+                        field('PetrifyHealthStatus').textContent = 'Enter a valid relay HTTP(S) base URL without credentials, queries or fragments.';
+                        return;
+                    }
+                    var controller = new AbortController();
+                    var timeout = setTimeout(function () { controller.abort(); }, 5000);
+                    field('PetrifyCheck').disabled = true;
+                    field('PetrifyHealthStatus').textContent = 'Checking relay…';
+                    fetch(address + '/v1/health', { signal: controller.signal, credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer', redirect: 'error' })
+                        .then(function (response) {
+                            if (!response.ok) throw new Error('Health request failed.');
+                            return response.json();
+                        }).then(function (health) {
+                            if (!health || health.ok !== true || health.service !== 'petrify') throw new Error('Not a Petrify health response.');
+                            var version = typeof health.version === 'string' && /^[a-zA-Z0-9._+-]{1,40}$/.test(health.version) ? health.version : 'not reported';
+                            var protocol = Number.isInteger(health.connectProtocol) ? String(health.connectProtocol) : 'not reported';
+                            var devices = Array.isArray(health.devices) ? String(health.devices.length) : 'not reported';
+                            var party = health.party === true ? 'on' : health.party === false ? 'off' : 'not reported';
+                            field('PetrifyHealthStatus').textContent = 'Relay reachable. Version: ' + version + '; connect protocol: ' + protocol + '; connected Petrify devices: ' + devices + '; party: ' + party + '. Checked ' + new Date().toLocaleTimeString() + '. This does not confirm discovery or playback.';
+                        }).catch(function () {
+                            field('PetrifyHealthStatus').textContent = 'Could not verify the relay. Confirm the running address and port, Jellyfin restart, firewall and browser HTTPS/private-network restrictions. The check times out after 5 seconds.';
+                        }).finally(function () {
+                            clearTimeout(timeout);
+                            field('PetrifyCheck').disabled = false;
+                        });
+                });
+            })();
         </script>
     </div>
 </body>

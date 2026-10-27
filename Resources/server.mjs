@@ -463,12 +463,13 @@ function broadcast(data, only) {
 // (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
 // Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
 //   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
-const RELAY_VERSION = "1.2.0";
+const RELAY_VERSION = "1.2.1";
 const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 1000));
 // A new track needs a fresh stream on every member, so track changes get a longer runway.
 const PARTY_TRACK_LEAD_MS = Math.max(800, Number(process.env.PETRIFY_PARTY_TRACK_LEAD_MS || 2200));
 const party = {
   on: false,
+  mode: "sync",
   rev: 0,
   host: "",
   roles: {},
@@ -575,7 +576,12 @@ function sortPartyQueue() {
 
 /** Number of party devices that may vote (members, or every connected device when the list is empty). */
 function partyVoterCount() {
+  if (party.mode === "voting") return new Set([...devices.keys(), party.host].filter(Boolean)).size;
   return party.members.length ? party.members.length : devices.size;
+}
+
+function partyVoter(id) {
+  return Boolean(id) && (party.mode === "voting" ? id === party.host || devices.has(id) : partyMember(id));
 }
 
 function partyMember(id) {
@@ -902,7 +908,9 @@ function partyAction(body, zoneAuthorized = false) {
     if (action === "start") {
       // A repeated start keeps the original host: the device that switched the party on.
       if (!party.on || !party.host) party.host = String(body.deviceId || "").slice(0, 64);
-      if (!party.on || Array.isArray(body.members)) party.members = cleanMembers(body.members, party.host);
+      party.mode = body.mode === "voting" ? "voting" : "sync";
+      if (party.mode === "voting") party.members = [party.host];
+      else if (!party.on || Array.isArray(body.members)) party.members = cleanMembers(body.members, party.host);
       party.roles = Object.fromEntries([...new Set([...party.members, ...devices.keys(), party.host])].filter(Boolean).map((id) => [id, id === party.host ? "HOST" : "GUEST"]));
       partyStats.clear();
       party.zoneStates = {};
@@ -974,12 +982,12 @@ function partyAction(body, zoneAuthorized = false) {
     const trackId = String(body.trackId || "");
     const userId = requester;
     const voteValue = Number(body.vote);
-    if (!trackId || !userId || !partyMember(userId) || !party.queue.includes(trackId)) return false;
+    if (!trackId || !partyVoter(userId) || !party.queue.includes(trackId)) return false;
     return castVote(trackId, userId, voteValue, now);
   }
   if (action === "suggest") {
     const item = cleanMediaQueue([body.item])[0];
-    if (!requester || !partyMember(requester) || !item || party.mediaQueue.some((entry) => entry.id === item.id)) return false;
+    if (!partyVoter(requester) || !item || party.mediaQueue.some((entry) => entry.id === item.id)) return false;
     party.mediaQueue.push(item);
     if (!party.queue.includes(item.id)) party.queue.push(item.id);
     party.queueVotes[item.id] = { score: 0, up: 0, down: 0, submittedAt: now, voters: {} };
@@ -1451,6 +1459,22 @@ async function onPost(req, res, url) {
         partyMessage("QUEUE_RESORTED", { newQueue: party.queue.slice() });
       }
     }
+    const mutation = ["vote", "remove", "reorder", "play-now", "suggest"].includes(String(body.action || ""));
+    if (!changed && mutation) {
+      const requester = String(body.deviceId || "");
+      const hostOnly = ["remove", "reorder", "play-now"].includes(String(body.action || ""));
+      const error = !party.on
+        ? "Start Party mode or Voting mode first."
+        : hostOnly && requester !== party.host
+          ? "Only the host can move, remove or play queued songs."
+          : body.action === "vote" && !partyVoter(requester)
+            ? "Join this party before voting."
+            : body.trackId === party.trackId
+              ? "The currently playing song cannot be voted on or moved."
+              : "The queue changed or this action has already been applied. Refresh and try again.";
+      sendJson(res, 409, { ok: false, changed: false, error, party: partyPublic(requester) });
+      return;
+    }
     sendJson(res, 200, { ok: true, changed, party: partyPublic(String(body.deviceId || "")) });
     return;
   }
@@ -1728,7 +1752,7 @@ const server = createServer((req, res) => {
     return;
   }
   if (req.method === "GET" && url.pathname === "/v1/health") {
-    sendJson(res, 200, { ok: true, service: "petrify", version: RELAY_VERSION, connectProtocol: 7, party: party.on, devices: listDevices() });
+    sendJson(res, 200, { ok: true, service: "petrify", version: RELAY_VERSION, connectProtocol: 7, capabilities: ["queue-voting", "queue-management", "independent-voting"], party: party.on, devices: listDevices() });
     return;
   }
   const guestPage = /^\/party\/([a-f0-9]{24})$/.exec(url.pathname);
