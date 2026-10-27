@@ -48,6 +48,8 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
             // Always force-overwrite extracted embedded resources on startup
             ExtractEmbeddedResource("Jellyfin.Plugin.Petrify.Resources.node.gz", nodePath, gzip: true);
             ExtractEmbeddedResource("Jellyfin.Plugin.Petrify.Resources.server.mjs", scriptPath);
+            // The guest party web page is served by the relay from next to server.mjs.
+            ExtractEmbeddedResource("Jellyfin.Plugin.Petrify.Resources.party-guest.html", Path.Combine(dataDir, "party-guest.html"));
 
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {

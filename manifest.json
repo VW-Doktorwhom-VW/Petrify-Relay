@@ -4,23 +4,16 @@
     "name": "Petrify",
     "description": "Auto-extracting network relay plugin.",
     "overview": "Runs Node relay automatically inside Jellyfin.",
-    "owner": "gelicleo555-spec",
+    "owner": "VW-Doktorwhom-VW",
     "category": "General",
     "versions": [
       {
-        "version": "1.0.8.0",
-        "changelog": "Party: relay version in health check, track-change lead, richer per-device sync stats.",
+        "version": "1.2.0.0",
+        "changelog": "Relay 1.2.0: democratic voting queue (most-voted song plays next, vote counts, new round each song), host/guest roles, guest web page at /party/<id>, zones and per-device latency offset, full-screen reactions to host.",
         "targetAbi": "10.10.0.0",
-        "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "c755869176a10fd468e373a3be820b80",
-        "timestamp": "2026-10-20T17:44:31Z"
-      },
-      {
-        "version": "1.0.7.0",
-        "changelog": "Party: longer track-change lead, richer per-device sync reports.",
-        "targetAbi": "10.10.0.0",
-        "sourceUrl": "https://raw.githubusercontent.com/gelicleo555-spec/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "cffb33d097be5ee11d7a522236461fc9"
+        "sourceUrl": "https://raw.githubusercontent.com/VW-Doktorwhom-VW/Petrify-Relay/main/build/Petrify.zip",
+        "checksum": "5c8e89a7b5ff4ee2e8d6dfe179fbd24f",
+        "timestamp": "2026-10-27T18:56:46Z"
       }
     ]
   }

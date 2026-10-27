@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Petrify service. Run this on the machine that stays on.
  * Clients (Windows app, Android app, browser) connect to it.
  * They do not connect to each other.
@@ -10,6 +10,8 @@
 import { createServer } from "node:http";
 import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { URL } from "node:url";
 
 const PORT = Number(process.env.PETRIFY_PORT || 8787);
@@ -23,6 +25,7 @@ const diagnosticEvents = [];
 const transferStates = new Map();
 const pendingTransfers = new Map();
 const userByToken = new Map();
+const partyInvites = new Map();
 let seq = 1;
 let activeId = "";
 let activeTrackId = "";
@@ -31,6 +34,16 @@ const hrNow = () => performance.timeOrigin + performance.now();
 
 function savePlaybackState(deviceId, state) {
   playbackState.set(deviceId, { ...state, updatedAt: Date.now() });
+}
+
+const PARTY_TIMELINE_FIELDS = ["index", "trackId", "anchorPos", "anchorAt", "playing", "repeat"];
+
+function partyTimelineSnapshot() {
+  return Object.fromEntries(PARTY_TIMELINE_FIELDS.map((key) => [key, party[key]]));
+}
+
+function restorePartyTimeline(snapshot) {
+  for (const key of PARTY_TIMELINE_FIELDS) party[key] = snapshot[key];
 }
 
 const freshWaiters = new Map();
@@ -233,7 +246,9 @@ function cleanBase(raw) {
 
 function absolute(req, pathAndQuery) {
   const host = req.headers.host || `127.0.0.1:${PORT}`;
-  return `http://${host}${pathAndQuery}`;
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const protocol = forwardedProto === "https" || req.socket.encrypted ? "https" : "http";
+  return `${protocol}://${host}${pathAndQuery}`;
 }
 
 function mediaUrl(req, base, token, deviceId, path) {
@@ -288,7 +303,7 @@ async function login(req, body) {
     return items;
   };
   const trackItems = await pages(
-    `${q}?IncludeItemTypes=Audio&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Fields=Album,AlbumArtists,Artists,Genres,RunTimeTicks,MediaSources,ProductionYear`,
+    `${q}?IncludeItemTypes=Audio&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Fields=Album,AlbumArtists,Artists,Genres,RunTimeTicks,MediaSources,ProductionYear,ReplayGainTrackGain,ReplayGainTrackPeak`,
     2000,
   );
   if (!trackItems) return { ok: false, error: "Library request failed." };
@@ -313,6 +328,8 @@ async function login(req, body) {
         `/Audio/${id}/universal?Container=mp3&AudioCodec=mp3&TranscodingContainer=mp3&MaxStreamingBitrate=256000&TranscodingProtocol=http`,
       ),
       secs: Number(item.RunTimeTicks || 0) / 10_000_000 || 0,
+      replayGainTrackGainDb: Number.parseFloat(String(item.ReplayGainTrackGain || "")) || 0,
+      replayGainTrackPeak: Number(item.ReplayGainTrackPeak || 0) || undefined,
       size: Number(item.MediaSources?.[0]?.Size || 0),
       bitrate: Number(item.MediaSources?.[0]?.Bitrate || 0),
       container: String(item.MediaSources?.[0]?.Container || item.Container || ""),
@@ -341,7 +358,7 @@ async function login(req, body) {
   for (const pl of playlistItems) {
     const id = String(pl.Id || "");
     const kids =
-      (await pages(`/Playlists/${id}/Items?UserId=${userId}&Fields=Album,AlbumArtists,Artists,Genres,RunTimeTicks,MediaSources,ProductionYear`, 3000)) || [];
+      (await pages(`/Playlists/${id}/Items?UserId=${userId}&Fields=Album,AlbumArtists,Artists,Genres,RunTimeTicks,MediaSources,ProductionYear,ReplayGainTrackGain,ReplayGainTrackPeak`, 3000)) || [];
     for (const item of kids) {
       const t = toTrack(item);
       if (t.id && !known.has(t.id)) {
@@ -446,7 +463,7 @@ function broadcast(data, only) {
 // (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
 // Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
 //   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
-const RELAY_VERSION = "1.0.7";
+const RELAY_VERSION = "1.2.0";
 const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 1000));
 // A new track needs a fresh stream on every member, so track changes get a longer runway.
 const PARTY_TRACK_LEAD_MS = Math.max(800, Number(process.env.PETRIFY_PARTY_TRACK_LEAD_MS || 2200));
@@ -454,10 +471,14 @@ const party = {
   on: false,
   rev: 0,
   host: "",
+  roles: {},
   // Participating device ids. Empty means every connected device follows the party.
   members: [],
   mediaQueue: [],
   queue: [],
+  queueVotes: {},
+  zones: {},
+  zoneStates: {},
   index: 0,
   trackId: "",
   anchorPos: 0,
@@ -467,30 +488,94 @@ const party = {
 };
 // Latest sync report per device: { drift, rtt, status, at } (ms). Not part of rev.
 const partyStats = new Map();
+const partyGuestStreams = new Set();
 let partyTimer = null;
+const partyZoneTimers = new Map();
 
 function partyPosition(now = hrNow()) {
   if (!party.playing) return party.anchorPos;
   return Math.max(0, party.anchorPos + (now - party.anchorAt) / 1000);
 }
 
+function partyTimelinePosition(timeline, now = hrNow()) {
+  if (!timeline.playing) return timeline.anchorPos;
+  return Math.max(0, timeline.anchorPos + (now - timeline.anchorAt) / 1000);
+}
+
 function partyTrack(id = party.trackId) {
   return party.mediaQueue.find((item) => item.id === id) || null;
 }
 
-function partyPublic() {
+function partyVoteSummary(trackId) {
+  const id = String(trackId || "");
+  const vote = party.queueVotes[id] || { score: 0, up: 0, down: 0, submittedAt: 0, voters: {} };
+  return {
+    score: Number(vote.score || 0),
+    up: Number(vote.up || 0),
+    down: Number(vote.down || 0),
+    submittedAt: Number(vote.submittedAt || 0),
+    voters: vote.voters && typeof vote.voters === "object" ? vote.voters : {},
+  };
+}
+
+function partyPublic(deviceId = "") {
   const serverNow = hrNow();
+  const zone = deviceId ? party.zones[deviceId] || "Default" : "";
+  const timeline = zone ? party.zoneStates[zone] || party : party;
   const stats = {};
   for (const [id, item] of partyStats) if (serverNow - item.at < 30000) stats[id] = item;
+  const { zoneStates: _zoneStates, ...publicParty } = party;
+  const { zoneStates: _ignoredZoneStates, ...publicTimeline } = timeline;
   return {
-    ...party,
+    ...publicParty,
+    ...publicTimeline,
+    zone,
     serverNow,
     leadMs: PARTY_LEAD_MS,
     trackLeadMs: PARTY_TRACK_LEAD_MS,
+    roles: { ...(party.roles || {}) },
+    queueVotes: Object.fromEntries(Object.keys(party.queueVotes || {}).map((id) => [id, partyVoteSummary(id)])),
+    voterCount: partyVoterCount(),
     // Explicit presentation time stamp of the shared timeline (same data as anchorPos/anchorAt).
-    pts: { trackId: party.trackId, position: party.anchorPos, at: party.anchorAt, playing: party.playing },
+    pts: { trackId: timeline.trackId, position: timeline.anchorPos, at: timeline.anchorAt, playing: timeline.playing },
     stats,
   };
+}
+
+function partyMessage(type, payload = {}, only) {
+  broadcast({ ...room({ type, ...payload }) }, only);
+}
+
+/**
+ * Songs already played keep their place; only the current song is locked. Everything after it is
+ * ordered by net score (up - down). Voted songs with the same score play in the order of their first
+ * vote (FIFO), and songs nobody voted on keep the original queue order, so after the voted songs the
+ * queue simply continues as before.
+ */
+function sortPartyQueue() {
+  if (!party.queue.length) return;
+  const currentIndex = party.queue.indexOf(party.trackId);
+  const played = currentIndex >= 0 ? party.queue.slice(0, currentIndex) : [];
+  const upcoming = (currentIndex >= 0 ? party.queue.slice(currentIndex + 1) : party.queue.slice())
+    .map((id, order) => ({ id, order, vote: partyVoteSummary(id) }))
+    .sort((a, b) => {
+      if (b.vote.score !== a.vote.score) return b.vote.score - a.vote.score;
+      const av = a.vote.up + a.vote.down > 0 ? a.vote.submittedAt : 0;
+      const bv = b.vote.up + b.vote.down > 0 ? b.vote.submittedAt : 0;
+      if (av && bv && av !== bv) return av - bv;
+      if (av && !bv) return -1;
+      if (bv && !av) return 1;
+      return a.order - b.order;
+    })
+    .map((entry) => entry.id);
+  const ordered = currentIndex >= 0 ? [...played, party.trackId, ...upcoming] : upcoming;
+  party.queue = [...new Set(ordered.filter(Boolean))];
+  party.index = Math.max(0, party.queue.indexOf(party.trackId));
+}
+
+/** Number of party devices that may vote (members, or every connected device when the list is empty). */
+function partyVoterCount() {
+  return party.members.length ? party.members.length : devices.size;
 }
 
 function partyMember(id) {
@@ -507,7 +592,30 @@ function cleanMembers(raw, host) {
 function partyBroadcast() {
   party.rev += 1;
   schedulePartyAdvance();
-  broadcast({ ...room({ type: "PARTY", party: partyPublic() }) });
+  for (const [id, device] of devices) {
+    const data = room({ type: "PARTY", party: partyPublic(id) });
+    for (const res of device.res) {
+      try {
+        writeSse(res, data);
+      } catch {
+        device.res.delete(res);
+      }
+    }
+  }
+  for (const stream of partyGuestStreams) {
+    try {
+      writeSse(stream.res, guestState(stream.inviteId, stream.key));
+      if (!party.on) {
+        clearInterval(stream.keepalive);
+        stream.res.end();
+        partyGuestStreams.delete(stream);
+      }
+    } catch {
+      clearInterval(stream.keepalive);
+      partyGuestStreams.delete(stream);
+      stream.res.destroy();
+    }
+  }
 }
 
 function partyGo(index, lead = PARTY_TRACK_LEAD_MS) {
@@ -524,6 +632,8 @@ function partyGo(index, lead = PARTY_TRACK_LEAD_MS) {
   }
   party.index = Math.max(0, index);
   party.trackId = ids[party.index];
+  // The voted song is playing now: its votes are used up and a new round starts for the rest.
+  if (party.queueVotes) delete party.queueVotes[party.trackId];
   party.anchorPos = 0;
   party.anchorAt = hrNow() + lead;
   party.playing = true;
@@ -532,19 +642,41 @@ function partyGo(index, lead = PARTY_TRACK_LEAD_MS) {
 function schedulePartyAdvance() {
   clearTimeout(partyTimer);
   partyTimer = null;
-  if (!party.on || !party.playing) return;
-  const secs = Number(partyTrack()?.secs || 0);
-  if (!(secs > 1)) return;
-  const left = (secs - partyPosition()) * 1000 + Math.max(0, party.anchorAt - hrNow());
-  partyTimer = setTimeout(() => {
-    if (!party.on || !party.playing) return;
-    if (party.repeat === "one") {
-      party.anchorPos = 0;
-      party.anchorAt = hrNow() + PARTY_TRACK_LEAD_MS;
-    } else partyGo(party.index + 1);
-    recordDiagnostic("party-advanced", { trackId: party.trackId });
-    partyBroadcast();
-  }, Math.max(250, left + 150));
+  for (const timer of partyZoneTimers.values()) clearTimeout(timer);
+  partyZoneTimers.clear();
+  if (!party.on) return;
+  const schedule = (zone, timeline) => {
+    if (!timeline.playing) return;
+    const secs = Number(partyTrack(timeline.trackId)?.secs || 0);
+    if (!(secs > 1)) return;
+    const position = partyTimelinePosition(timeline);
+    const left = (secs - position) * 1000 + Math.max(0, timeline.anchorAt - hrNow());
+    const timer = setTimeout(() => {
+      if (!party.on) return;
+      const globalTimeline = zone ? partyTimelineSnapshot() : null;
+      if (zone) restorePartyTimeline(party.zoneStates[zone] || timeline);
+      if (!party.playing) {
+        if (globalTimeline) restorePartyTimeline(globalTimeline);
+        return;
+      }
+      if (party.repeat === "one") {
+        party.anchorPos = 0;
+        party.anchorAt = hrNow() + PARTY_TRACK_LEAD_MS;
+      } else partyGo(party.index + 1);
+      if (zone) party.zoneStates[zone] = partyTimelineSnapshot();
+      recordDiagnostic("party-advanced", { trackId: party.trackId, ...(zone ? { zone } : {}) });
+      if (globalTimeline) restorePartyTimeline(globalTimeline);
+      else {
+        // A global transition is authoritative for every zone.
+        for (const name of Object.keys(party.zoneStates)) party.zoneStates[name] = partyTimelineSnapshot();
+      }
+      partyBroadcast();
+    }, Math.max(250, left + 150));
+    if (zone) partyZoneTimers.set(zone, timer);
+    else partyTimer = timer;
+  };
+  schedule("", party);
+  for (const [zone, timeline] of Object.entries(party.zoneStates)) schedule(zone, timeline);
 }
 
 function cleanMediaQueue(raw) {
@@ -557,13 +689,212 @@ function cleanMediaQueue(raw) {
     url: String(item?.url || "").slice(0, 2000),
     cover: String(item?.cover || "").slice(0, 2000),
     secs: Number(item?.secs || 0) || 0,
-  })).filter((item) => item.id);
+  })).filter((item) => {
+    if (!item.id) return false;
+    try {
+      const url = new URL(item.url, "http://petrify.invalid");
+      return url.pathname === "/api/jf" && ["http:", "https:"].includes(url.protocol) && !url.username && !url.password;
+    } catch {
+      return false;
+    }
+  });
 }
 
-function partyAction(body) {
+function inviteFor(body) {
+  const inviteId = String(body.inviteId || "").slice(0, 40);
+  const key = String(body.key || "");
+  const invite = partyInvites.get(inviteId);
+  if (!invite || invite.expiresAt <= Date.now()) {
+    partyInvites.delete(inviteId);
+    return null;
+  }
+  const candidate = createHash("sha256").update(key).digest();
+  return timingSafeEqual(candidate, invite.keyHash) ? invite : null;
+}
+
+function partyCredentials() {
+  for (const item of party.mediaQueue) {
+    try {
+      const url = new URL(item.url);
+      const base = cleanBase(url.searchParams.get("base"));
+      const token = url.searchParams.get("token") || "";
+      const deviceId = (url.searchParams.get("device") || "petrify").slice(0, 64);
+      if (base && token) return { base, token, deviceId };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function guestState(inviteId, key) {
+  const track = partyTrack();
+  const duration = Number(track?.secs || 0);
+  const current = party.queue.indexOf(party.trackId);
+  const queue = party.queue.slice(current + 1).map((id) => {
+    const item = party.mediaQueue.find((entry) => entry.id === id);
+    const vote = partyVoteSummary(id);
+    return item ? { id, title: item.title, artist: item.artist, score: vote.score, up: vote.up, down: vote.down } : null;
+  }).filter(Boolean);
+  return {
+    ok: true,
+    party: {
+      on: party.on,
+      track: track ? {
+        id: track.id,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        cover: track.cover
+          ? `/v1/party/guest-image?inviteId=${encodeURIComponent(inviteId)}&key=${encodeURIComponent(key)}&trackId=${encodeURIComponent(track.id)}`
+          : "",
+      } : null,
+      position: duration > 0 ? Math.min(duration, partyPosition() + Math.max(0, party.anchorAt - hrNow()) / 1000) : partyPosition(),
+      duration,
+      playing: party.playing,
+      queue,
+    },
+  };
+}
+
+function validGuestId(raw) {
+  const id = String(raw || "");
+  return /^[a-zA-Z0-9_-]{8,48}$/.test(id) ? id : "";
+}
+
+/** Upvote (1), downvote (-1) or take back (0) one voter's vote on an upcoming song. */
+function castVote(trackId, voter, voteValue, now = hrNow()) {
+  if (!trackId || !voter || !(voteValue === 1 || voteValue === -1 || voteValue === 0)) return false;
+  const position = party.queue.indexOf(trackId);
+  // Only upcoming songs can be voted on; the playing song and the ones before it are settled.
+  if (position < 0 || trackId === party.trackId || position < party.queue.indexOf(party.trackId)) return false;
+  const next = party.queueVotes[trackId] || { score: 0, up: 0, down: 0, submittedAt: 0, voters: {} };
+  const prev = Number(next.voters?.[voter] || 0);
+  if (prev === voteValue) return false;
+  next.voters = { ...(next.voters || {}) };
+  if (prev === 1) next.up = Math.max(0, Number(next.up || 0) - 1);
+  if (prev === -1) next.down = Math.max(0, Number(next.down || 0) - 1);
+  if (voteValue === 1) next.up = Number(next.up || 0) + 1;
+  if (voteValue === -1) next.down = Number(next.down || 0) + 1;
+  if (voteValue === 0) delete next.voters[voter];
+  else next.voters[voter] = voteValue;
+  next.score = Number(next.up || 0) - Number(next.down || 0);
+  if (next.up + next.down === 0) next.submittedAt = 0;
+  else if (!next.submittedAt) next.submittedAt = now;
+  party.queueVotes[trackId] = next;
+  sortPartyQueue();
+  return true;
+}
+
+async function guestSearch(body) {
+  const query = String(body.query || "").trim().slice(0, 100);
+  if (query.length < 2) return { ok: true, results: [] };
+  const credentials = partyCredentials();
+  if (!credentials) return { ok: false, error: "The host has not shared a searchable library." };
+  const search = new URLSearchParams({
+    SearchTerm: query,
+    IncludeItemTypes: "Audio",
+    Recursive: "true",
+    Limit: "25",
+    Fields: "Album,Artists,RunTimeTicks",
+  });
+  const me = await jf(credentials.base, "/Users/Me", credentials.token, credentials.deviceId, {
+    signal: AbortSignal.timeout(8000),
+  });
+  const user = me.ok ? await me.json() : null;
+  const itemsPath = user?.Id ? `/Users/${encodeURIComponent(user.Id)}/Items?${search}` : `/Items?${search}`;
+  const response = await jf(credentials.base, itemsPath, credentials.token, credentials.deviceId, {
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) return { ok: false, error: `Library search failed (${response.status}).` };
+  const result = await response.json();
+  return {
+    ok: true,
+    results: (result.Items || []).slice(0, 25).map((item) => ({
+      id: String(item.Id || ""),
+      title: String(item.Name || "Untitled"),
+      artist: Array.isArray(item.Artists) ? String(item.Artists[0] || "") : String(item.AlbumArtist || ""),
+      album: String(item.Album || ""),
+      cover: item.Id
+        ? `/v1/party/guest-image?inviteId=${encodeURIComponent(body.inviteId)}&key=${encodeURIComponent(body.key)}&trackId=${encodeURIComponent(String(item.Id))}`
+        : "",
+    })).filter((item) => item.id),
+  };
+}
+
+async function guestSuggest(req, body) {
+  const guestId = validGuestId(body.guestId);
+  const trackId = String(body.trackId || "").slice(0, 80);
+  const credentials = partyCredentials();
+  if (!guestId || !trackId || !credentials) return { ok: false, error: "Invalid guest or track." };
+  if (party.mediaQueue.some((item) => item.id === trackId)) return { ok: true, message: "Already queued." };
+  const response = await jf(credentials.base, `/Items/${encodeURIComponent(trackId)}?Fields=Album,Artists,RunTimeTicks`, credentials.token, credentials.deviceId, {
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) return { ok: false, error: `Track lookup failed (${response.status}).` };
+  const item = await response.json();
+  if (String(item.MediaType || "").toLowerCase() !== "audio" && String(item.Type || "").toLowerCase() !== "audio") {
+    return { ok: false, error: "That library item is not an audio track." };
+  }
+  const id = String(item.Id || "");
+  const title = String(item.Name || "Untitled");
+  const artists = Array.isArray(item.Artists) ? item.Artists : [];
+  party.mediaQueue.push({
+    id,
+    title,
+    artist: String(artists[0] || item.AlbumArtist || ""),
+    album: String(item.Album || ""),
+    secs: Number(item.RunTimeTicks || 0) / 10_000_000,
+    url: mediaUrl(req, credentials.base, credentials.token, credentials.deviceId, `/Audio/${encodeURIComponent(id)}/universal?Container=mp3&AudioCodec=mp3&TranscodingContainer=mp3&MaxStreamingBitrate=256000&TranscodingProtocol=http`),
+    cover: mediaUrl(req, credentials.base, credentials.token, credentials.deviceId, `/Items/${encodeURIComponent(String(item.AlbumId || id))}/Images/Primary?maxWidth=600&quality=80`),
+  });
+  if (!party.queue.includes(id)) party.queue.push(id);
+  party.queueVotes[id] = {
+    score: 0,
+    up: 0,
+    down: 0,
+    submittedAt: hrNow(),
+    voters: {},
+  };
+  sortPartyQueue();
+  partyBroadcast();
+  partyMessage("QUEUE_RESORTED", { newQueue: party.queue.slice() });
+  return { ok: true };
+}
+
+function partyAction(body, zoneAuthorized = false) {
   const action = String(body.action || "");
+  const requester = String(body.deviceId || "").slice(0, 64);
+  const targetZone = String(body.targetZone || "").trim();
+  if (targetZone && targetZone.toLowerCase() !== "all") {
+    const zoneActions = new Set(["play", "pause", "toggle", "seek", "next", "prev", "ended", "repeat"]);
+    const requesterZone = party.zones[requester] || "Default";
+    const isMember = partyMember(requester);
+    const zoneHasDevices = [...devices.keys()].some((id) => partyMember(id) && (party.zones[id] || "Default") === targetZone);
+    if (
+      !party.on ||
+      !zoneActions.has(action) ||
+      !isMember ||
+      (action !== "ended" && requester !== party.host) ||
+      (action === "ended" && requesterZone !== targetZone) ||
+      !zoneHasDevices
+    ) return false;
+    if (targetZone === "Default") return partyAction({ ...body, targetZone: "all" }, true);
+    const globalTimeline = partyTimelineSnapshot();
+    const zoneTimeline = party.zoneStates[targetZone] || partyTimelineSnapshot();
+    restorePartyTimeline(zoneTimeline);
+    try {
+      const changed = partyAction({ ...body, targetZone: "all" }, true);
+      party.zoneStates[targetZone] = partyTimelineSnapshot();
+      return changed;
+    } finally {
+      restorePartyTimeline(globalTimeline);
+    }
+  }
   const now = hrNow();
   if (action === "start" || action === "load") {
+    if (action === "load" && requester !== party.host) return false;
+    if (action === "start" && party.on && requester !== party.host) return false;
     const mediaQueue = cleanMediaQueue(body.mediaQueue);
     if (mediaQueue.length) party.mediaQueue = mediaQueue;
     const queue = Array.isArray(body.queue) ? body.queue.map(String).slice(0, 2000) : [];
@@ -572,25 +903,144 @@ function partyAction(body) {
       // A repeated start keeps the original host: the device that switched the party on.
       if (!party.on || !party.host) party.host = String(body.deviceId || "").slice(0, 64);
       if (!party.on || Array.isArray(body.members)) party.members = cleanMembers(body.members, party.host);
+      party.roles = Object.fromEntries([...new Set([...party.members, ...devices.keys(), party.host])].filter(Boolean).map((id) => [id, id === party.host ? "HOST" : "GUEST"]));
       partyStats.clear();
+      party.zoneStates = {};
       party.on = true;
     }
     const trackId = String(body.trackId || party.trackId || party.queue[0] || "");
+    if (action === "start") party.queueVotes = {};
+    else party.queueVotes = Object.fromEntries(Object.entries(party.queueVotes || {}).filter(([id]) => party.queue.includes(id)));
     party.index = Math.max(0, party.queue.indexOf(trackId));
     party.trackId = party.queue[party.index] || trackId;
     party.anchorPos = Math.max(0, Number(body.position || 0));
     party.anchorAt = now + PARTY_TRACK_LEAD_MS;
     party.playing = body.playing !== false && Boolean(party.trackId);
+    sortPartyQueue();
     if (body.repeat) party.repeat = String(body.repeat);
     return true;
   }
+  if (action === "zone") {
+    const targetId = String(body.target || "").slice(0, 64);
+    const zone = String(body.zone || "").trim().slice(0, 40);
+    if (requester !== party.host || !targetId || !partyMember(targetId) || !devices.has(targetId)) return false;
+    if (zone) party.zones[targetId] = zone;
+    else delete party.zones[targetId];
+    return true;
+  }
+  if (action === "reaction") {
+    const emoji = String(body.emoji || "");
+    const allowed = new Set(["ðŸ”¥", "ðŸ’ƒ", "â¤ï¸", "ðŸ‘"]);
+    if (!requester || !partyMember(requester) || !allowed.has(emoji)) return false;
+    const zone = String(body.zone || "all").trim().slice(0, 40) || "all";
+    const targets = zone === "all"
+      ? undefined
+      : [...new Set([
+          ...[...devices.keys()].filter((id) => partyMember(id) && (party.zones[id] || "Default") === zone),
+          party.host,
+          requester,
+        ].filter((id) => id && devices.has(id)))];
+    if (targets?.length === 0) return false;
+    partyMessage("PARTY_REACTION", {
+      reaction: { id: `${now}-${requester}`, emoji, from: String(devices.get(requester)?.name || "Guest").slice(0, 40), at: now },
+      zone,
+    }, targets);
+    return true;
+  }
+  if (action === "report") {
+    const id = requester;
+    if (id) {
+      const num = (value) => (Number.isFinite(Number(value)) ? Math.round(Number(value) * 10) / 10 : null);
+      partyStats.set(id, {
+        drift: num(body.drift) ?? 0,
+        rtt: num(body.rtt) ?? 0,
+        status: String(body.status || "").slice(0, 60),
+        state: String(body.state || "").slice(0, 20),
+        rate: num(body.rate),
+        offset: num(body.offset),
+        position: num(body.position),
+        buffered: num(body.buffered),
+        latency: num(body.latency),
+        trackId: String(body.trackId || "").slice(0, 80),
+        platform: String(body.platform || "").slice(0, 20),
+        resyncs: Number(body.resyncs || 0) || 0,
+        at: hrNow(),
+      });
+    }
+    return false;
+  }
   if (!party.on) return false;
+  if (action === "vote") {
+    const trackId = String(body.trackId || "");
+    const userId = requester;
+    const voteValue = Number(body.vote);
+    if (!trackId || !userId || !partyMember(userId) || !party.queue.includes(trackId)) return false;
+    return castVote(trackId, userId, voteValue, now);
+  }
+  if (action === "suggest") {
+    const item = cleanMediaQueue([body.item])[0];
+    if (!requester || !partyMember(requester) || !item || party.mediaQueue.some((entry) => entry.id === item.id)) return false;
+    party.mediaQueue.push(item);
+    if (!party.queue.includes(item.id)) party.queue.push(item.id);
+    party.queueVotes[item.id] = { score: 0, up: 0, down: 0, submittedAt: now, voters: {} };
+    sortPartyQueue();
+    return true;
+  }
+  if (action === "role") {
+    const targetId = String(body.target || body.deviceId || "").slice(0, 64);
+    const role = String(body.role || "").toUpperCase() === "HOST" ? "HOST" : "GUEST";
+    if (
+      requester !== party.host ||
+      !targetId ||
+      (targetId !== party.host && !partyMember(targetId)) ||
+      (role === "GUEST" && targetId === party.host)
+    ) return false;
+    const nextRoles = { ...(party.roles || {}) };
+    if (role === "HOST") {
+      nextRoles[targetId] = "HOST";
+      if (party.host && party.host !== targetId) nextRoles[party.host] = "GUEST";
+      party.host = targetId;
+    } else {
+      nextRoles[targetId] = "GUEST";
+    }
+    party.roles = nextRoles;
+    return true;
+  }
+  if (requester !== party.host && !(action === "ended" && zoneAuthorized)) return false;
+  if (action === "remove") {
+    const trackId = String(body.trackId || "");
+    if (!trackId || trackId === party.trackId || !party.queue.includes(trackId)) return false;
+    party.queue = party.queue.filter((id) => id !== trackId);
+    party.mediaQueue = party.mediaQueue.filter((item) => item.id !== trackId);
+    delete party.queueVotes[trackId];
+    party.index = party.queue.indexOf(party.trackId);
+    return true;
+  }
+  if (action === "reorder") {
+    const trackId = String(body.trackId || "");
+    if (!trackId || trackId === party.trackId || !party.queue.includes(trackId)) return false;
+    const from = party.queue.indexOf(trackId);
+    const firstUpcoming = Math.max(1, party.queue.indexOf(party.trackId) + 1);
+    const to = Math.max(firstUpcoming, Math.min(party.queue.length - 1, Math.floor(Number(body.index) || 0)));
+    if (from === to) return false;
+    party.queue.splice(from, 1);
+    party.queue.splice(to, 0, trackId);
+    party.index = party.queue.indexOf(party.trackId);
+    return true;
+  }
+  if (action === "play-now") {
+    const index = party.queue.indexOf(String(body.trackId || ""));
+    if (index < 0 || party.queue[index] === party.trackId) return false;
+    partyGo(index);
+    return true;
+  }
   if (action === "stop") {
     // Freeze the shared timeline: the host carries on from exactly here, everyone else stops.
     const wasPlaying = party.playing;
     party.anchorPos = partyPosition(now);
     party.anchorAt = now;
     party.on = false;
+    partyInvites.clear();
     party.playing = wasPlaying;
     clearTimeout(partyTimer);
     // Sent after the "party off" broadcast, so followers no longer treat it as a stray party STOP.
@@ -619,6 +1069,15 @@ function partyAction(body) {
     party.anchorAt = now + (party.playing ? PARTY_LEAD_MS : 0);
     return true;
   }
+  if (action === "ended") {
+    if (requester !== party.host && !zoneAuthorized) return false;
+    if (String(body.trackId || "") !== party.trackId || !party.playing) return false;
+    const secs = Number(partyTrack()?.secs || 0);
+    if (secs > 1 && partyPosition(now) < secs - 4) return false;
+    partyGo(party.index + 1);
+    return true;
+  }
+  if (requester !== party.host) return false;
   if (action === "next") {
     partyGo(party.index + 1);
     return true;
@@ -629,13 +1088,6 @@ function partyAction(body) {
       party.anchorAt = now + PARTY_TRACK_LEAD_MS;
       party.playing = true;
     } else partyGo(Math.max(0, party.index - 1));
-    return true;
-  }
-  if (action === "ended") {
-    if (String(body.trackId || "") !== party.trackId || !party.playing) return false;
-    const secs = Number(partyTrack()?.secs || 0);
-    if (secs > 1 && partyPosition(now) < secs - 4) return false;
-    partyGo(party.index + 1);
     return true;
   }
   if (action === "repeat") {
@@ -667,29 +1119,6 @@ function partyAction(body) {
     }
     party.members = cleanMembers(list, party.host);
     return true;
-  }
-  if (action === "report") {
-    // Followers report how far they are from the timeline; shown in the party panel. No broadcast.
-    const id = String(body.deviceId || "").slice(0, 64);
-    if (id) {
-      const num = (value) => (Number.isFinite(Number(value)) ? Math.round(Number(value) * 10) / 10 : null);
-      partyStats.set(id, {
-        drift: num(body.drift) ?? 0,
-        rtt: num(body.rtt) ?? 0,
-        status: String(body.status || "").slice(0, 60),
-        state: String(body.state || "").slice(0, 20),
-        rate: num(body.rate),
-        offset: num(body.offset),
-        position: num(body.position),
-        buffered: num(body.buffered),
-        latency: num(body.latency),
-        trackId: String(body.trackId || "").slice(0, 80),
-        platform: String(body.platform || "").slice(0, 20),
-        resyncs: Number(body.resyncs || 0) || 0,
-        at: hrNow(),
-      });
-    }
-    return false;
   }
   return false;
 }
@@ -915,6 +1344,77 @@ async function onPost(req, res, url) {
     }
     return;
   }
+  if (url.pathname === "/v1/party/invite") {
+    const deviceId = String(body.deviceId || "").slice(0, 64);
+    if (!party.on || !deviceId || deviceId !== party.host) {
+      sendJson(res, 403, { ok: false, error: "Only the active party host can create a guest invite." });
+      return;
+    }
+    const inviteId = randomBytes(12).toString("hex");
+    const key = randomBytes(32).toString("base64url");
+    const expiresAt = Date.now() + 8 * 60 * 60 * 1000;
+    partyInvites.set(inviteId, { keyHash: createHash("sha256").update(key).digest(), expiresAt });
+    for (const [id, invite] of partyInvites) if (invite.expiresAt <= Date.now()) partyInvites.delete(id);
+    sendJson(res, 200, {
+      ok: true,
+      inviteId,
+      key,
+      expiresAt,
+      url: absolute(req, `/party/${inviteId}?key=${encodeURIComponent(key)}`),
+    });
+    return;
+  }
+  if (url.pathname.startsWith("/v1/party/guest-")) {
+    const invite = inviteFor(body);
+    if (!invite) {
+      sendJson(res, 403, { ok: false, error: "This guest invite is invalid or has expired." });
+      return;
+    }
+    if (!party.on) {
+      sendJson(res, 409, { ok: false, error: "This party has ended." });
+      return;
+    }
+    if (url.pathname === "/v1/party/guest-state") {
+      sendJson(res, 200, guestState(String(body.inviteId), String(body.key)));
+      return;
+    }
+    if (url.pathname === "/v1/party/guest-search") {
+      try {
+        const result = await guestSearch(body);
+        sendJson(res, result.ok ? 200 : 502, result);
+      } catch (error) {
+        sendJson(res, 502, { ok: false, error: error instanceof Error ? error.message : "Library search failed." });
+      }
+      return;
+    }
+    const guestId = validGuestId(body.guestId);
+    if (!guestId) {
+      sendJson(res, 400, { ok: false, error: "A valid guest session is required." });
+      return;
+    }
+    const voter = `web:${String(body.inviteId)}:${guestId}`;
+    if (url.pathname === "/v1/party/guest-vote") {
+      const trackId = String(body.trackId || "").slice(0, 80);
+      const changed = castVote(trackId, voter, Number(body.vote));
+      if (changed) {
+        partyBroadcast();
+        partyMessage("QUEUE_RESORTED", { newQueue: party.queue.slice() });
+      }
+      sendJson(res, 200, { ok: true, changed });
+      return;
+    }
+    if (url.pathname === "/v1/party/guest-suggest") {
+      try {
+        const result = await guestSuggest(req, body);
+        sendJson(res, result.ok ? 200 : 400, result);
+      } catch (error) {
+        sendJson(res, 502, { ok: false, error: error instanceof Error ? error.message : "Could not add that suggestion." });
+      }
+      return;
+    }
+    sendJson(res, 404, { ok: false, error: "Guest endpoint not found." });
+    return;
+  }
   if (url.pathname === "/v1/party") {
     const changed = partyAction(body);
     if (body.action === "report") {
@@ -922,14 +1422,36 @@ async function onPost(req, res, url) {
       return;
     }
     if (changed) {
+      const zoneTarget = String(body.targetZone || "").trim();
+      if ((!zoneTarget || zoneTarget.toLowerCase() === "all") && party.on &&
+        ["start", "load", "play", "pause", "toggle", "seek", "next", "prev", "ended", "repeat"].includes(String(body.action || ""))) {
+        for (const zone of Object.keys(party.zoneStates)) party.zoneStates[zone] = partyTimelineSnapshot();
+      }
       recordDiagnostic("party-" + String(body.action || "update"), {
         deviceId: String(body.deviceId || ""),
         trackId: party.trackId,
         position: party.anchorPos,
       });
       partyBroadcast();
+      if (body.action === "vote") {
+        partyMessage("QUEUE_VOTE_CAST", {
+          trackId: String(body.trackId || ""),
+          userId: String(body.deviceId || "").slice(0, 64),
+          vote: Number(body.vote),
+        });
+        partyMessage("QUEUE_RESORTED", { newQueue: party.queue.slice() });
+      } else if (body.action === "suggest") {
+        partyMessage("QUEUE_RESORTED", { newQueue: party.queue.slice() });
+      } else if (body.action === "role") {
+        partyMessage("PARTY_ROLE_CHANGE", {
+          userId: String(body.target || body.deviceId || "").slice(0, 64),
+          role: String(body.role || "").toUpperCase() === "HOST" ? "HOST" : "GUEST",
+        });
+      } else if (["remove", "reorder", "play-now"].includes(String(body.action || ""))) {
+        partyMessage("QUEUE_RESORTED", { newQueue: party.queue.slice() });
+      }
     }
-    sendJson(res, 200, { ok: true, changed, party: partyPublic() });
+    sendJson(res, 200, { ok: true, changed, party: partyPublic(String(body.deviceId || "")) });
     return;
   }
   if (url.pathname === "/v1/diagnostics") {
@@ -1209,6 +1731,113 @@ const server = createServer((req, res) => {
     sendJson(res, 200, { ok: true, service: "petrify", version: RELAY_VERSION, connectProtocol: 7, party: party.on, devices: listDevices() });
     return;
   }
+  const guestPage = /^\/party\/([a-f0-9]{24})$/.exec(url.pathname);
+  if (req.method === "GET" && guestPage) {
+    const inviteId = guestPage[1];
+    if (!inviteFor({ inviteId, key: url.searchParams.get("key") })) {
+      sendJson(res, 403, { ok: false, error: "This guest invite is invalid or has expired." });
+      return;
+    }
+    void readFile(new URL("./party-guest.html", import.meta.url)).then((html) => {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+      });
+      res.end(html);
+    }).catch((error) => {
+      console.error(`Guest page could not be loaded: ${error instanceof Error ? error.message : "read failed"}`);
+      sendJson(res, 500, { ok: false, error: "Guest page is unavailable." });
+    });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/v1/party/guest-events") {
+    const streamData = {
+      inviteId: String(url.searchParams.get("inviteId") || ""),
+      key: String(url.searchParams.get("key") || ""),
+    };
+    const invite = inviteFor(streamData);
+    if (!invite) {
+      sendJson(res, 403, { ok: false, error: "This guest invite is invalid or has expired." });
+      return;
+    }
+    if (!party.on) {
+      sendJson(res, 409, { ok: false, error: "This party has ended." });
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-store, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Referrer-Policy": "no-referrer",
+    });
+    const stream = {
+      res,
+      inviteId: streamData.inviteId,
+      key: streamData.key,
+      expiresAt: invite.expiresAt,
+      keepalive: null,
+    };
+    writeSse(res, guestState(stream.inviteId, stream.key));
+    stream.keepalive = setInterval(() => {
+      if (Date.now() >= stream.expiresAt) {
+        clearInterval(stream.keepalive);
+        partyGuestStreams.delete(stream);
+        res.end();
+        return;
+      }
+      if (!res.destroyed) res.write(": keep-alive\n\n");
+    }, 15_000);
+    partyGuestStreams.add(stream);
+    res.on("close", () => {
+      clearInterval(stream.keepalive);
+      partyGuestStreams.delete(stream);
+    });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/v1/party/guest-image") {
+    const params = {
+      inviteId: url.searchParams.get("inviteId"),
+      key: url.searchParams.get("key"),
+    };
+    if (!inviteFor(params)) {
+      sendJson(res, 403, { ok: false, error: "This guest invite is invalid or has expired." });
+      return;
+    }
+    const trackId = String(url.searchParams.get("trackId") || "");
+    const credentials = partyCredentials();
+    if (!party.on || !/^[a-zA-Z0-9_-]{1,80}$/.test(trackId) || !credentials) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    void (async () => {
+      try {
+        const path = `/Items/${encodeURIComponent(trackId)}/Images/Primary?maxWidth=600&quality=80`;
+        const upstream = await jf(credentials.base, path, credentials.token, credentials.deviceId, { signal: AbortSignal.timeout(8000) });
+        if (!upstream.ok) {
+          res.writeHead(upstream.status);
+          res.end();
+          return;
+        }
+        const data = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(200, {
+          "Content-Type": upstream.headers.get("content-type") || "image/jpeg",
+          "Content-Length": data.length,
+          "Cache-Control": "private, max-age=300",
+          "X-Content-Type-Options": "nosniff",
+        });
+        res.end(data);
+      } catch {
+        res.writeHead(502);
+        res.end();
+      }
+    })();
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/v1/time") {
     cors(res);
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -1216,7 +1845,8 @@ const server = createServer((req, res) => {
     return;
   }
   if (req.method === "GET" && url.pathname === "/v1/party") {
-    sendJson(res, 200, { ok: true, party: partyPublic() });
+    const deviceId = String(url.searchParams.get("device") || "").slice(0, 64);
+    sendJson(res, 200, { ok: true, party: partyPublic(deviceId) });
     return;
   }
   if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
@@ -1276,7 +1906,7 @@ const server = createServer((req, res) => {
     bucket.res.add(res);
     recordDiagnostic("device-connected", { deviceId: id, name });
     broadcast(room(null));
-    if (party.on) writeSse(res, room({ type: "PARTY", party: partyPublic() }));
+    if (party.on) writeSse(res, room({ type: "PARTY", party: partyPublic(id) }));
     res.on("close", () => {
       clearInterval(keepalive);
       bucket.res.delete(res);

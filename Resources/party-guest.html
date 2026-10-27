@@ -1,0 +1,951 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111310">
+  <title>Party guest - Petrify</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111310;
+      --panel: #1a1d18;
+      --panel-raised: #22261f;
+      --line: #343a30;
+      --text: #f2f1e9;
+      --muted: #a7ad9e;
+      --quiet: #737b6d;
+      --accent: #c9f36a;
+      --accent-ink: #1a2110;
+      --danger: #ff9a86;
+      --radius: 18px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+
+    * { box-sizing: border-box; }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      clip-path: inset(50%);
+    }
+
+    body {
+      min-width: 320px;
+      min-height: 100vh;
+      margin: 0;
+      background:
+        radial-gradient(ellipse at 82% -10%, rgba(201, 243, 106, 0.1), transparent 34rem),
+        var(--bg);
+    }
+
+    button, input { font: inherit; }
+    button:not(:disabled) { cursor: pointer; }
+    button:focus-visible, input:focus-visible {
+      outline: 3px solid var(--accent);
+      outline-offset: 3px;
+    }
+
+    .shell {
+      width: min(100% - 32px, 980px);
+      margin: 0 auto;
+      padding: 22px 0 48px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 2px 0 26px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 750;
+      letter-spacing: 0.04em;
+      text-decoration: none;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border: 1px solid rgba(201, 243, 106, 0.45);
+      border-radius: 9px;
+      color: var(--accent);
+      font-size: 17px;
+      line-height: 1;
+    }
+
+    .live-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      padding: 0 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--quiet);
+    }
+
+    .live-badge.is-live { color: var(--accent); }
+    .live-badge.is-live .live-dot {
+      background: var(--accent);
+      box-shadow: 0 0 12px rgba(201, 243, 106, 0.55);
+    }
+
+    .intro { margin-bottom: 20px; }
+    .eyebrow {
+      margin: 0 0 7px;
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(29px, 7vw, 42px);
+      letter-spacing: -0.045em;
+      line-height: 1.08;
+    }
+
+    .subheading {
+      margin: 9px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .layout {
+      display: grid;
+      gap: 16px;
+    }
+
+    .card {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.16);
+    }
+
+    .now-card { padding: 16px; }
+
+    .section-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .now-playing {
+      display: grid;
+      grid-template-columns: 96px minmax(0, 1fr);
+      align-items: center;
+      gap: 16px;
+    }
+
+    .cover {
+      position: relative;
+      display: grid;
+      width: 96px;
+      aspect-ratio: 1;
+      overflow: hidden;
+      place-items: center;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 13px;
+      background:
+        linear-gradient(135deg, transparent 48%, rgba(201, 243, 106, 0.24) 49% 51%, transparent 52%),
+        linear-gradient(40deg, #30382a, #59623d 54%, #242a20);
+      color: var(--accent);
+    }
+
+    .cover::before, .cover::after {
+      position: absolute;
+      width: 56%;
+      height: 56%;
+      border: 1px solid rgba(242, 241, 233, 0.18);
+      border-radius: 50%;
+      content: "";
+    }
+
+    .cover::after { width: 24%; height: 24%; }
+
+    .cover img {
+      position: absolute;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .cover img[hidden] { display: none; }
+
+    .track-title {
+      overflow: hidden;
+      margin: 0;
+      font-size: clamp(17px, 4vw, 22px);
+      font-weight: 750;
+      letter-spacing: -0.025em;
+      line-height: 1.2;
+      text-overflow: ellipsis;
+    }
+
+    .track-artist {
+      overflow: hidden;
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .track-album {
+      overflow: hidden;
+      margin: 4px 0 0;
+      color: var(--quiet);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .playback {
+      margin-top: 21px;
+    }
+
+    .progress-track {
+      height: 5px;
+      overflow: hidden;
+      border-radius: 99px;
+      background: #394034;
+    }
+
+    .progress-fill {
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--accent);
+      transition: width 350ms linear;
+    }
+
+    .time-row {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 8px;
+      color: var(--quiet);
+      font-variant-numeric: tabular-nums;
+      font-size: 11px;
+    }
+
+    .track-state {
+      margin: 15px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .queue-card, .search-card { padding: 16px; }
+
+    .queue-list, .result-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .empty-state {
+      margin: 0;
+      padding: 18px 12px;
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      color: var(--quiet);
+      font-size: 13px;
+      line-height: 1.5;
+      text-align: center;
+    }
+
+    .queue-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      min-height: 62px;
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.055);
+      border-radius: 12px;
+      background: var(--panel-raised);
+    }
+
+    .queue-copy { min-width: 0; }
+    .queue-title, .result-title {
+      overflow: hidden;
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .queue-artist, .result-artist {
+      overflow: hidden;
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .vote-actions {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .icon-button {
+      display: inline-flex;
+      min-width: 42px;
+      min-height: 42px;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 0 7px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #1b1e19;
+      color: var(--muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+    }
+
+    .icon-button:hover:not(:disabled) {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .icon-button:disabled { cursor: wait; opacity: 0.55; }
+
+    .search-form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+    }
+
+    .search-input {
+      width: 100%;
+      min-width: 0;
+      min-height: 46px;
+      padding: 0 13px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #121510;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .search-input::placeholder { color: var(--quiet); }
+
+    .primary-button {
+      min-height: 46px;
+      padding: 0 16px;
+      border: 0;
+      border-radius: 11px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-size: 13px;
+      font-weight: 800;
+      transition: filter 150ms ease, transform 150ms ease;
+    }
+
+    .primary-button:hover:not(:disabled) { filter: brightness(1.06); }
+    .primary-button:active:not(:disabled) { transform: translateY(1px); }
+    .primary-button:disabled { cursor: wait; opacity: 0.65; }
+
+    .search-hint, .feedback {
+      min-height: 18px;
+      margin: 9px 0 0;
+      color: var(--quiet);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .feedback[data-kind="error"] { color: var(--danger); }
+    .feedback[data-kind="success"] { color: var(--accent); }
+
+    .result-section { margin-top: 17px; }
+    .result-section[hidden] { display: none; }
+
+    .result-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.055);
+      border-radius: 12px;
+      background: var(--panel-raised);
+    }
+
+    .suggest-button {
+      min-height: 42px;
+      padding: 0 12px;
+      border: 1px solid rgba(201, 243, 106, 0.42);
+      border-radius: 10px;
+      background: rgba(201, 243, 106, 0.08);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .suggest-button:hover:not(:disabled) { background: rgba(201, 243, 106, 0.16); }
+    .suggest-button:disabled { cursor: wait; opacity: 0.6; }
+
+    .footer-note {
+      margin: 20px 0 0;
+      color: var(--quiet);
+      font-size: 10px;
+      line-height: 1.5;
+      text-align: center;
+    }
+
+    @media (min-width: 720px) {
+      .shell { padding-top: 34px; }
+      .topbar { padding-bottom: 35px; }
+      .intro { margin-bottom: 25px; }
+      .layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 18px; }
+      .now-card { grid-column: 1; }
+      .queue-card { grid-column: 1; }
+      .search-card { grid-column: 2; grid-row: 1 / span 2; }
+      .now-playing { grid-template-columns: 124px minmax(0, 1fr); gap: 20px; }
+      .cover { width: 124px; }
+      .now-card, .queue-card, .search-card { padding: 20px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand" aria-label="Petrify Party">
+        <span class="brand-mark" aria-hidden="true">P</span>
+        <span>PETRIFY</span>
+      </div>
+      <div id="partyBadge" class="live-badge" role="status" aria-live="polite">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span id="partyBadgeText">Connecting</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="pageTitle">
+        <p class="eyebrow">Shared listening</p>
+        <h1 id="pageTitle">You're on the guest list.</h1>
+        <p class="subheading">See what's playing, vote on the queue, or add a track to the party.</p>
+      </section>
+
+      <div class="layout">
+        <section class="card now-card" aria-labelledby="nowHeading">
+          <h2 class="section-label" id="nowHeading">
+            <span>Now playing</span>
+            <span id="playStatus">Waiting for music</span>
+          </h2>
+          <div class="now-playing">
+            <div class="cover" aria-hidden="true">
+              <img id="trackCover" alt="" hidden>
+            </div>
+            <div>
+              <p class="track-title" id="trackTitle">Nothing playing yet</p>
+              <p class="track-artist" id="trackArtist">The host's next pick will show up here.</p>
+              <p class="track-album" id="trackAlbum"></p>
+            </div>
+          </div>
+          <div class="playback">
+            <div
+              id="progressBar"
+              class="progress-track"
+              role="progressbar"
+              aria-label="Track progress"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <div id="progressFill" class="progress-fill"></div>
+            </div>
+            <div class="time-row" aria-hidden="true">
+              <span id="currentTime">0:00</span>
+              <span id="totalTime">0:00</span>
+            </div>
+          </div>
+          <p class="track-state" id="connectionMessage" role="status" aria-live="polite">Joining the party...</p>
+        </section>
+
+        <section class="card queue-card" aria-labelledby="queueHeading">
+          <h2 class="section-label" id="queueHeading">
+            <span>Up next</span>
+            <span id="queueCount">0 tracks</span>
+          </h2>
+          <div id="queueList" class="queue-list" aria-live="polite">
+            <p class="empty-state">The queue is clear. Suggest a track to get things moving.</p>
+          </div>
+          <p id="voteFeedback" class="feedback" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="card search-card" aria-labelledby="searchHeading">
+          <h2 class="section-label" id="searchHeading"><span>Pick the next track</span></h2>
+          <form id="searchForm" class="search-form">
+            <label class="sr-only" for="searchInput">Search tracks</label>
+            <input
+              id="searchInput"
+              class="search-input"
+              type="search"
+              name="query"
+              placeholder="Artist, track, album..."
+              autocomplete="off"
+              maxlength="160"
+              required
+            >
+            <button id="searchButton" class="primary-button" type="submit">Search</button>
+          </form>
+          <p id="searchFeedback" class="search-hint" role="status" aria-live="polite">Find a track and suggest it for the queue.</p>
+          <div id="resultSection" class="result-section" hidden>
+            <h3 class="section-label"><span>Search results</span></h3>
+            <div id="resultList" class="result-list"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+    <p class="footer-note">Party controls are shared with everyone listening.</p>
+  </div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const byId = (id) => document.getElementById(id);
+      const route = new URL(window.location.href);
+      const pathParts = route.pathname.split("/").filter(Boolean);
+      let inviteId = "";
+      try {
+        if (pathParts.length >= 2 && pathParts[pathParts.length - 2] === "party") {
+          inviteId = decodeURIComponent(pathParts[pathParts.length - 1]);
+        }
+      } catch {
+        inviteId = "";
+      }
+      const key = route.searchParams.get("key") || "";
+      let guestId = "";
+      let lastParty = null;
+      let lastReceivedAt = 0;
+      let pollTimer = 0;
+      let pollInProgress = false;
+      let partyEvents = null;
+      const pendingActions = new Set();
+
+      function makeGuestId() {
+        if (window.crypto && typeof window.crypto.randomUUID === "function") {
+          return window.crypto.randomUUID();
+        }
+        const bytes = new Uint8Array(16);
+        if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+          window.crypto.getRandomValues(bytes);
+        } else {
+          for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+        }
+        return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      }
+
+      function getGuestId() {
+        const storageKey = `petrify-party-guest-${inviteId}`;
+        for (const storageName of ["localStorage", "sessionStorage"]) {
+          try {
+            const storage = window[storageName];
+            let value = storage.getItem(storageKey);
+            if (!value) {
+              value = makeGuestId();
+              storage.setItem(storageKey, value);
+            }
+            if (value) return value;
+          } catch {
+            // Continue to session storage or use an in-memory id.
+          }
+        }
+        return makeGuestId();
+      }
+
+      function setFeedback(element, message, kind) {
+        element.textContent = message;
+        if (kind) element.dataset.kind = kind;
+        else delete element.dataset.kind;
+      }
+
+      async function postJson(path, extra) {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ inviteId, key, ...extra }),
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error("The party service is unavailable. Try again in a moment.");
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          throw new Error("The party service returned an unreadable response.");
+        }
+        if (!data || data.ok === false) {
+          throw new Error("That request could not be completed. Please try again.");
+        }
+        return data;
+      }
+
+      function safeText(value, fallback) {
+        return typeof value === "string" && value.trim() ? value : fallback;
+      }
+
+      function safeCoverUrl(value) {
+        if (typeof value !== "string" || !value.trim()) return "";
+        try {
+          const parsed = new URL(value, window.location.origin);
+          if (parsed.origin !== window.location.origin) return "";
+          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+          if (/\/(?:api\/jf|audio)(?:\/|$)/i.test(parsed.pathname)) return "";
+          return parsed.href;
+        } catch {
+          return "";
+        }
+      }
+
+      function setCover(value) {
+        const image = byId("trackCover");
+        const src = safeCoverUrl(value);
+        if (!src) {
+          image.removeAttribute("src");
+          image.hidden = true;
+          return;
+        }
+        image.onerror = () => {
+          image.hidden = true;
+          image.removeAttribute("src");
+        };
+        image.onload = () => { image.hidden = false; };
+        image.src = src;
+      }
+
+      function formatTime(seconds) {
+        const value = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+        const hours = Math.floor(value / 3600);
+        const minutes = Math.floor((value % 3600) / 60);
+        const remainder = value % 60;
+        if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+        return `${minutes}:${String(remainder).padStart(2, "0")}`;
+      }
+
+      function setTrack(party) {
+        const track = party && party.track ? party.track : null;
+        const playing = Boolean(party && party.playing);
+        byId("trackTitle").textContent = track ? safeText(track.title, "Untitled track") : "Nothing playing yet";
+        byId("trackArtist").textContent = track
+          ? safeText(track.artist, "Unknown artist")
+          : "The host's next pick will show up here.";
+        byId("trackAlbum").textContent = track && track.album ? track.album : "";
+        setCover(track && track.cover);
+        byId("playStatus").textContent = playing ? "Playing" : track ? "Paused" : "Waiting for music";
+        lastParty = {
+          position: Math.max(0, Number(party && party.position) || 0),
+          duration: Math.max(0, Number(party && party.duration) || 0),
+          playing,
+        };
+        lastReceivedAt = performance.now();
+        updateProgress();
+      }
+
+      function updateProgress() {
+        const duration = lastParty ? lastParty.duration : 0;
+        const elapsed = lastParty && lastParty.playing
+          ? (performance.now() - lastReceivedAt) / 1000
+          : 0;
+        const position = lastParty ? lastParty.position + elapsed : 0;
+        const boundedPosition = duration > 0 ? Math.min(duration, position) : position;
+        const percent = duration > 0 ? Math.min(100, (boundedPosition / duration) * 100) : 0;
+        byId("progressFill").style.width = `${percent}%`;
+        byId("progressBar").setAttribute("aria-valuenow", String(Math.round(percent)));
+        byId("currentTime").textContent = formatTime(boundedPosition);
+        byId("totalTime").textContent = formatTime(duration);
+      }
+
+      function makeButton(label, title, action, disabled) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "icon-button";
+        button.setAttribute("aria-label", label);
+        button.title = title;
+        button.textContent = label;
+        button.disabled = disabled;
+        button.addEventListener("click", action);
+        return button;
+      }
+
+      function renderQueue(queue) {
+        const host = byId("queueList");
+        const tracks = Array.isArray(queue) ? queue : [];
+        byId("queueCount").textContent = `${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}`;
+        const fragment = document.createDocumentFragment();
+        if (!tracks.length) {
+          const empty = document.createElement("p");
+          empty.className = "empty-state";
+          empty.textContent = "The queue is clear. Suggest a track to get things moving.";
+          fragment.append(empty);
+          host.replaceChildren(fragment);
+          return;
+        }
+
+        tracks.forEach((track) => {
+          const item = document.createElement("article");
+          item.className = "queue-item";
+
+          const copy = document.createElement("div");
+          copy.className = "queue-copy";
+          const title = document.createElement("p");
+          title.className = "queue-title";
+          title.textContent = safeText(track && track.title, "Untitled track");
+          const artist = document.createElement("p");
+          artist.className = "queue-artist";
+          artist.textContent = safeText(track && track.artist, "Unknown artist");
+          copy.append(title, artist);
+
+          const actions = document.createElement("div");
+          actions.className = "vote-actions";
+          const trackId = track && typeof track.id === "string" ? track.id : "";
+          const busy = pendingActions.has(`vote:${trackId}`);
+          actions.append(
+            makeButton(`Upvote ${title.textContent}`, `Upvote: ${title.textContent}`, () => sendVote(trackId, 1), busy || !trackId),
+            makeButton(`Downvote ${title.textContent}`, `Downvote: ${title.textContent}`, () => sendVote(trackId, -1), busy || !trackId),
+          );
+          const upButton = actions.children[0];
+          const downButton = actions.children[1];
+          upButton.textContent = `+ ${Number(track && track.up) || 0}`;
+          downButton.textContent = `- ${Number(track && track.down) || 0}`;
+          item.append(copy, actions);
+          fragment.append(item);
+        });
+        host.replaceChildren(fragment);
+      }
+
+      async function sendVote(trackId, vote) {
+        const actionKey = `vote:${trackId}`;
+        if (!trackId || pendingActions.has(actionKey)) return;
+        pendingActions.add(actionKey);
+        renderQueue(lastPartyData && lastPartyData.queue);
+        setFeedback(byId("voteFeedback"), "Sending your vote...", "");
+        try {
+          await postJson("/v1/party/guest-vote", { guestId, trackId, vote });
+          setFeedback(byId("voteFeedback"), "Vote counted. Thanks for weighing in.", "success");
+        } catch (error) {
+          setFeedback(byId("voteFeedback"), error.message, "error");
+        } finally {
+          pendingActions.delete(actionKey);
+          renderQueue(lastPartyData && lastPartyData.queue);
+        }
+      }
+
+      let lastPartyData = null;
+
+      function renderParty(data) {
+        const party = data && data.party ? data.party : {};
+        lastPartyData = party;
+        setTrack(party);
+        renderQueue(party.queue);
+        const active = Boolean(party.on);
+        byId("partyBadge").classList.toggle("is-live", active);
+        byId("partyBadgeText").textContent = active ? "Party live" : "Party paused";
+        byId("connectionMessage").textContent = active
+          ? "Live updates refresh automatically."
+          : "The host has paused the party. This page will keep checking for updates.";
+      }
+
+      function schedulePoll(delay = 2000) {
+        window.clearTimeout(pollTimer);
+        pollTimer = window.setTimeout(poll, delay);
+      }
+
+      async function poll() {
+        if (pollInProgress || !inviteId || !key) return;
+        pollInProgress = true;
+        try {
+          const data = await postJson("/v1/party/guest-state", {});
+          renderParty(data);
+        } catch (error) {
+          byId("partyBadge").classList.remove("is-live");
+          byId("partyBadgeText").textContent = "Reconnecting";
+          byId("connectionMessage").textContent = error.message;
+        } finally {
+          pollInProgress = false;
+          schedulePoll();
+        }
+      }
+
+      function connectPartyEvents() {
+        const eventUrl = `/v1/party/guest-events?inviteId=${encodeURIComponent(inviteId)}&key=${encodeURIComponent(key)}`;
+        partyEvents = new EventSource(eventUrl);
+        partyEvents.onopen = () => {
+          byId("partyBadgeText").textContent = "Party live";
+          byId("connectionMessage").textContent = "Live updates connected.";
+        };
+        partyEvents.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data && data.ok !== false) renderParty(data);
+          } catch {
+            byId("connectionMessage").textContent = "A live update could not be read. Waiting for the next update.";
+          }
+        };
+        partyEvents.onerror = () => {
+          byId("partyBadge").classList.remove("is-live");
+          byId("partyBadgeText").textContent = "Reconnecting";
+          byId("connectionMessage").textContent = "Live updates were interrupted. Reconnecting...";
+        };
+      }
+
+      function renderSearchResults(results) {
+        const section = byId("resultSection");
+        const host = byId("resultList");
+        const fragment = document.createDocumentFragment();
+        const tracks = Array.isArray(results) ? results : [];
+        if (!tracks.length) {
+          const empty = document.createElement("p");
+          empty.className = "empty-state";
+          empty.textContent = "No tracks found. Try another search.";
+          fragment.append(empty);
+        }
+        tracks.forEach((track) => {
+          const item = document.createElement("article");
+          item.className = "result-item";
+          const copy = document.createElement("div");
+          const title = document.createElement("p");
+          title.className = "result-title";
+          title.textContent = safeText(track && track.title, "Untitled track");
+          const artist = document.createElement("p");
+          artist.className = "result-artist";
+          artist.textContent = [
+            safeText(track && track.artist, "Unknown artist"),
+            track && track.album ? track.album : "",
+          ].filter(Boolean).join(" - ");
+          copy.append(title, artist);
+
+          const trackId = track && typeof track.id === "string" ? track.id : "";
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "suggest-button";
+          button.textContent = "Suggest";
+          button.disabled = !trackId || pendingActions.has(`suggest:${trackId}`);
+          button.addEventListener("click", () => suggestTrack(trackId, button));
+          item.append(copy, button);
+          fragment.append(item);
+        });
+        host.replaceChildren(fragment);
+        section.hidden = false;
+      }
+
+      async function suggestTrack(trackId, button) {
+        const actionKey = `suggest:${trackId}`;
+        if (!trackId || pendingActions.has(actionKey)) return;
+        pendingActions.add(actionKey);
+        button.disabled = true;
+        button.textContent = "Adding...";
+        setFeedback(byId("searchFeedback"), "Sending your suggestion...", "");
+        try {
+          await postJson("/v1/party/guest-suggest", { guestId, trackId });
+          button.textContent = "Suggested";
+          setFeedback(byId("searchFeedback"), "Track suggested for the party.", "success");
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = "Suggest";
+          setFeedback(byId("searchFeedback"), error.message, "error");
+        } finally {
+          pendingActions.delete(actionKey);
+        }
+      }
+
+      async function searchTracks(query) {
+        const button = byId("searchButton");
+        button.disabled = true;
+        button.textContent = "Searching...";
+        byId("resultSection").hidden = true;
+        setFeedback(byId("searchFeedback"), "Searching tracks...", "");
+        try {
+          const data = await postJson("/v1/party/guest-search", { query });
+          renderSearchResults(data.results);
+          setFeedback(byId("searchFeedback"), `${Array.isArray(data.results) ? data.results.length : 0} results`, "");
+        } catch (error) {
+          setFeedback(byId("searchFeedback"), error.message, "error");
+        } finally {
+          button.disabled = false;
+          button.textContent = "Search";
+        }
+      }
+
+      byId("searchForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const query = byId("searchInput").value.trim();
+        if (query) searchTracks(query);
+      });
+
+      window.setInterval(updateProgress, 500);
+      if (!inviteId || !key) {
+        byId("partyBadgeText").textContent = "Invite needed";
+        byId("connectionMessage").textContent = "This invite link is incomplete. Ask the host for a new party link.";
+        byId("searchButton").disabled = true;
+        byId("searchInput").disabled = true;
+        return;
+      }
+
+      guestId = getGuestId();
+      if (typeof EventSource === "function") connectPartyEvents();
+      else poll();
+      window.addEventListener("pagehide", () => {
+        window.clearTimeout(pollTimer);
+        partyEvents?.close();
+      }, { once: true });
+    })();
+  </script>
+</body>
+</html>
