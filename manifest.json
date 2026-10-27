@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.2.2.0",
-        "changelog": "Relay 1.2.2: every connected device can vote in Party or Voting mode; any connected device can start or stop a shared session, and a device can leave playback or pause voting only for itself. Host handoff keeps the party alive when its current host leaves. Voting capabilities are reported in health and the client shows per-song device counts.",
+        "version": "1.2.3.0",
+        "changelog": "Relay 1.2.3: fixes reaction delivery from connected voters who are not Party playback members, ensures zone-targeted reactions also reach the host, validates reactions consistently across clients, and returns actionable errors for rejected party actions.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/VW-Doktorwhom-VW/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "4572772112889f65d0315df52daefaee",
-        "timestamp": "2026-10-27T20:49:52Z"
+        "checksum": "69F6B0E654509A6E2B42405AC6E87FBC",
+        "timestamp": "2026-10-27T22:25:24Z"
       }
     ]
   }

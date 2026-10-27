@@ -443,7 +443,7 @@ function writeSse(res, data) {
 
 function broadcast(data, only) {
   for (const [id, device] of devices) {
-    if (only && id !== only) continue;
+    if (only && (Array.isArray(only) ? !only.includes(id) : id !== only)) continue;
     for (const res of device.res) {
       try {
         writeSse(res, data);
@@ -463,7 +463,7 @@ function broadcast(data, only) {
 // (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
 // Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
 //   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
-const RELAY_VERSION = "1.2.2";
+const RELAY_VERSION = "1.2.3";
 const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 1000));
 // A new track needs a fresh stream on every member, so track changes get a longer runway.
 const PARTY_TRACK_LEAD_MS = Math.max(800, Number(process.env.PETRIFY_PARTY_TRACK_LEAD_MS || 2200));
@@ -948,8 +948,8 @@ function partyAction(body, zoneAuthorized = false) {
   }
   if (action === "reaction") {
     const emoji = String(body.emoji || "");
-    const allowed = new Set(["ðŸ”¥", "ðŸ’ƒ", "â¤ï¸", "ðŸ‘"]);
-    if (!requester || !partyMember(requester) || !allowed.has(emoji)) return false;
+    const allowed = new Set(["\u{1F525}", "\u{1F483}", "\u2764\uFE0F", "\u{1F44F}"]);
+    if (!party.on || !devices.has(requester) || !allowed.has(emoji)) return false;
     const zone = String(body.zone || "all").trim().slice(0, 40) || "all";
     const targets = zone === "all"
       ? undefined
@@ -957,7 +957,7 @@ function partyAction(body, zoneAuthorized = false) {
           ...[...devices.keys()].filter((id) => partyMember(id) && (party.zones[id] || "Default") === zone),
           party.host,
           requester,
-        ].filter((id) => id && devices.has(id)))];
+        ].filter((id) => devices.has(id)))];
     if (targets?.length === 0) return false;
     partyMessage("PARTY_REACTION", {
       reaction: { id: `${now}-${requester}`, emoji, from: String(devices.get(requester)?.name || "Guest").slice(0, 40), at: now },
@@ -1503,13 +1503,23 @@ async function onPost(req, res, url) {
         partyMessage("QUEUE_RESORTED", { newQueue: party.queue.slice() });
       }
     }
-    const mutation = ["vote", "remove", "reorder", "play-now", "suggest"].includes(String(body.action || ""));
-    if (!changed && mutation) {
+    const action = String(body.action || "");
+    const mutation = ["vote", "remove", "reorder", "play-now", "suggest"].includes(action);
+    const partyActionNeedsFeedback = ["reaction", "voter-opt-in", "voter-opt-out", "join", "leave"].includes(action);
+    if (!changed && (mutation || partyActionNeedsFeedback)) {
       const requester = String(body.deviceId || "");
       const hostOnly = ["remove", "reorder", "play-now"].includes(String(body.action || ""));
-      const error = !party.on
-        ? "Start Party mode or Voting mode first."
-        : hostOnly && requester !== party.host
+      const error = action === "reaction"
+        ? !party.on
+          ? "Start Party mode or Voting mode before sending reactions."
+          : !devices.has(requester)
+            ? "Connect this device to the same Petrify service before sending reactions."
+            : "That reaction or target zone is not available."
+        : ["voter-opt-in", "voter-opt-out"].includes(action) && !devices.has(requester)
+          ? "Connect this device to the same Petrify service before changing voting."
+          : !party.on && action !== "start"
+            ? "Start Party mode or Voting mode first."
+            : hostOnly && requester !== party.host
           ? "Only the host can move, remove or play queued songs."
           : body.action === "vote" && !partyVoter(requester)
             ? party.voterOptOut.includes(requester)
