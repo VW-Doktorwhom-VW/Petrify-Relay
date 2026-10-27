@@ -1,8 +1,10 @@
 # Petrify plugin settings
 
 The Jellyfin dashboard page configures the bundled relay; all changes take effect
-only after restarting Jellyfin. Plugin version 1.2.1.0 preserves the original
-`ServerPort` setting and defaults new fields for existing installations.
+only after restarting Jellyfin. Plugin version 1.2.4.0 preserves the original
+`ServerPort` setting and defaults new fields for existing installations. Its
+health response advertises queue voting, independent voting and party reactions,
+so clients and administrators can verify the capabilities of the running relay.
 
 | Setting | Relay environment | Default | Validation |
 | --- | --- | --- | --- |

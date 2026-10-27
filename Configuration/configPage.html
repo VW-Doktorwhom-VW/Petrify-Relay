@@ -9,7 +9,7 @@
         <div data-role="content">
             <div class="content-primary">
                 <h2>Petrify relay</h2>
-                <p>Plugin 1.2.1.0 starts a bundled relay process with Jellyfin. It lets Petrify apps discover this server on the LAN, see connected Petrify devices, hand off playback and coordinate synchronized listening parties and guest voting. It also proxies Jellyfin artwork and audio requested by clients.</p>
+                <p>Plugin 1.2.4.0 starts a bundled relay process with Jellyfin. It lets Petrify apps discover this server on the LAN, see connected Petrify devices, hand off playback and coordinate synchronized listening parties, independent queue voting and reactions. It also proxies Jellyfin artwork and audio requested by clients.</p>
                 <h3>What it checks and handles</h3>
                 <ul>
                     <li>LAN discovery answers Petrify discovery packets; device connections report presence and playback state. Device counts refer to relay-connected Petrify clients, not every Jellyfin session.</li>
@@ -165,7 +165,12 @@
                             var protocol = Number.isInteger(health.connectProtocol) ? String(health.connectProtocol) : 'not reported';
                             var devices = Array.isArray(health.devices) ? String(health.devices.length) : 'not reported';
                             var party = health.party === true ? 'on' : health.party === false ? 'off' : 'not reported';
-                            field('PetrifyHealthStatus').textContent = 'Relay reachable. Version: ' + version + '; connect protocol: ' + protocol + '; connected Petrify devices: ' + devices + '; party: ' + party + '. Checked ' + new Date().toLocaleTimeString() + '. This does not confirm discovery or playback.';
+                            var capabilities = Array.isArray(health.capabilities) ? health.capabilities : [];
+                            var voting = capabilities.indexOf('queue-voting') !== -1 && capabilities.indexOf('independent-voting') !== -1;
+                            var reactions = capabilities.indexOf('party-reactions') !== -1;
+                            var features = 'queue voting: ' + (voting ? 'available' : 'not advertised') + '; party reactions: ' + (reactions ? 'available' : 'not advertised');
+                            var nextStep = voting && reactions ? '' : ' This URL is reaching an older or different relay; update/restart the Jellyfin plugin and verify the reverse-proxy target.';
+                            field('PetrifyHealthStatus').textContent = 'Relay reachable. Version: ' + version + '; connect protocol: ' + protocol + '; connected Petrify devices: ' + devices + '; party: ' + party + '; ' + features + '.' + nextStep + ' Checked ' + new Date().toLocaleTimeString() + '. This does not confirm discovery or playback.';
                         }).catch(function () {
                             field('PetrifyHealthStatus').textContent = 'Could not verify the relay. Confirm the running address and port, Jellyfin restart, firewall and browser HTTPS/private-network restrictions. The check times out after 5 seconds.';
                         }).finally(function () {

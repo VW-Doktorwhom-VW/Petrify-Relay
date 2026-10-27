@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.2.3.0",
-        "changelog": "Relay 1.2.3: fixes reaction delivery from connected voters who are not Party playback members, ensures zone-targeted reactions also reach the host, validates reactions consistently across clients, and returns actionable errors for rejected party actions.",
+        "version": "1.2.4.0",
+        "changelog": "Relay 1.2.4: republishes the current voting and reaction-enabled relay so installations can update from legacy 1.0.7 builds; health reports voting, queue management, independent voting and reaction capabilities, and plugin settings identify outdated or incorrectly routed relay URLs.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/VW-Doktorwhom-VW/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "69F6B0E654509A6E2B42405AC6E87FBC",
-        "timestamp": "2026-10-27T22:25:24Z"
+        "checksum": "4307F0CF59997E91C9BF4F3B3676CE7D",
+        "timestamp": "2026-10-27T23:00:00Z"
       }
     ]
   }
