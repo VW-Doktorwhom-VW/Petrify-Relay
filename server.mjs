@@ -258,10 +258,12 @@ function mediaUrl(req, base, token, deviceId, path) {
   );
 }
 
-async function login(req, body) {
+async function login(body, req) {
   const base = cleanBase(body.url);
   const deviceId = String(body.deviceId || "petrify").replace(/[^\w.-]/g, "").slice(0, 64) || "petrify";
-  const infoRes = await jf(base, "/System/Info/Public", body.apiKey || "", deviceId);
+  const infoRes = await jf(base, "/System/Info/Public", body.apiKey || "", deviceId, {
+    signal: AbortSignal.timeout(12_000),
+  });
   if (!infoRes.ok) return { ok: false, error: `Jellyfin answered ${infoRes.status}.` };
   const info = await infoRes.json();
   let token = String(body.apiKey || "").trim();
@@ -272,6 +274,7 @@ async function login(req, body) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ Username: body.username, Pw: body.password }),
+      signal: AbortSignal.timeout(12_000),
     });
     if (!authRes.ok) {
       const detail = (await authRes.text()).slice(0, 180);
@@ -282,11 +285,26 @@ async function login(req, body) {
     userId = auth.User?.Id || "";
     if (!token) return { ok: false, error: "Jellyfin did not return a token." };
   } else {
-    const me = await jf(base, "/Users/Me", token, deviceId);
+    const me = await jf(base, "/Users/Me", token, deviceId, { signal: AbortSignal.timeout(12_000) });
     if (me.ok) userId = (await me.json()).Id || "";
   }
+  if (body.fast === true) {
+    return {
+      ok: true,
+      serverName: info.ServerName || "Jellyfin",
+      token,
+      userId,
+      tracks: [],
+      albums: [],
+      playlists: [],
+      suggestions: [],
+      albumArtists: [],
+      artists: [],
+      genres: [],
+      collections: [],
+    };
+  }
   const q = userId ? `/Users/${userId}/Items` : "/Items";
-  // Jellyfin pages large libraries, so walk every page instead of stopping at the first one.
   const pages = async (path, max = 100000) => {
     const items = [];
     for (let start = 0; start < max; start += 500) {
@@ -335,14 +353,14 @@ async function login(req, body) {
       container: String(item.MediaSources?.[0]?.Container || item.Container || ""),
       year: item.ProductionYear ? String(item.ProductionYear) : "",
       genres: Array.isArray(item.Genres) ? item.Genres.map(String) : [],
-      artists: artists,
+      artists,
       albumArtist: String(item.AlbumArtist || artists[0] || "Unknown"),
       kind: "music",
       lyrics: [],
     };
   };
   const tracks = trackItems.map(toTrack);
-  const known = new Set(tracks.map((t) => t.id));
+  const known = new Set(tracks.map((track) => track.id));
   const albums = albumItems.map((item) => {
     const id = String(item.Id || "");
     return {
@@ -355,23 +373,23 @@ async function login(req, body) {
   });
   const playlistItems = (await pages(`${q}?IncludeItemTypes=Playlist&Recursive=true&SortBy=SortName`, 200)) || [];
   const playlists = [];
-  for (const pl of playlistItems) {
-    const id = String(pl.Id || "");
-    const kids =
+  for (const playlist of playlistItems) {
+    const id = String(playlist.Id || "");
+    const children =
       (await pages(`/Playlists/${id}/Items?UserId=${userId}&Fields=Album,AlbumArtists,Artists,Genres,RunTimeTicks,MediaSources,ProductionYear,ReplayGainTrackGain,ReplayGainTrackPeak`, 3000)) || [];
-    for (const item of kids) {
-      const t = toTrack(item);
-      if (t.id && !known.has(t.id)) {
-        known.add(t.id);
-        tracks.push(t);
+    for (const item of children) {
+      const track = toTrack(item);
+      if (track.id && !known.has(track.id)) {
+        known.add(track.id);
+        tracks.push(track);
       }
     }
     playlists.push({
       id,
-      title: String(pl.Name || "Playlist"),
-      sub: `${kids.length} songs`,
+      title: String(playlist.Name || "Playlist"),
+      sub: `${children.length} songs`,
       cover: mediaUrl(req, base, token, deviceId, `/Items/${id}/Images/Primary?maxWidth=400&quality=80`),
-      trackIds: kids.map((item) => String(item.Id || "")),
+      trackIds: children.map((item) => String(item.Id || "")),
     });
   }
   const colRes = await jf(base, `${q}?IncludeItemTypes=BoxSet&Recursive=true&Limit=40`, token, deviceId);
@@ -379,7 +397,11 @@ async function login(req, body) {
   const shelf = (kind) => {
     const groups = new Map();
     for (const track of tracks) {
-      const names = kind === "genre" ? track.genres : kind === "albumArtist" ? [track.albumArtist] : track.artists.length ? track.artists : [track.artist];
+      const names = kind === "genre"
+        ? track.genres
+        : kind === "albumArtist"
+          ? [track.albumArtist]
+          : track.artists.length ? track.artists : [track.artist];
       for (const name of names) {
         if (!name) continue;
         const ids = groups.get(name) || [];
@@ -404,8 +426,8 @@ async function login(req, body) {
     albums,
     playlists,
     suggestions: albumItems
-      .map((item, i) => [String(item.DateCreated || ""), albums[i]])
-      .sort((x, y) => y[0].localeCompare(x[0]))
+      .map((item, index) => [String(item.DateCreated || ""), albums[index]])
+      .sort((a, b) => b[0].localeCompare(a[0]))
       .slice(0, 16)
       .map((pair) => pair[1]),
     albumArtists: shelf("albumArtist"),
@@ -463,7 +485,7 @@ function broadcast(data, only) {
 // (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
 // Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
 //   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
-const RELAY_VERSION = "1.2.7";
+const RELAY_VERSION = "1.2.8";
 const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 1000));
 // A new track needs a fresh stream on every member, so track changes get a longer runway.
 const PARTY_TRACK_LEAD_MS = Math.max(800, Number(process.env.PETRIFY_PARTY_TRACK_LEAD_MS || 2200));
@@ -1400,7 +1422,7 @@ async function onPost(req, res, url) {
   }
   if (url.pathname === "/v1/login") {
     try {
-      sendJson(res, 200, await login(req, body));
+      sendJson(res, 200, await login(body, req));
     } catch (err) {
       sendJson(res, 200, { ok: false, error: err instanceof Error ? err.message : "Could not reach Jellyfin." });
     }

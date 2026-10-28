@@ -1,7 +1,7 @@
 # Petrify plugin settings
 
 The Jellyfin dashboard page configures the bundled relay; all changes take effect
-only after restarting Jellyfin. Plugin version 1.2.7.0 preserves the original
+only after restarting Jellyfin. Plugin version 1.2.8.0 preserves the original
 `ServerPort` setting and defaults new fields for existing installations. Its
 health response advertises queue voting, independent voting and party reactions,
 so clients and administrators can verify the capabilities of the running relay.
@@ -9,6 +9,10 @@ It reports playback protocol 8, including acknowledged cross-device handoffs
 that stop the source only after the destination confirms playback. Party mode
 can be stopped by any connected device; stopping after a handoff keeps the
 current playback owner active. Handoffs allow longer media preparation times.
+Updated Petrify clients opt into quick Jellyfin sign-in and scan the catalog
+separately, so login does not wait for the full library and playlist walk.
+Older clients that omit the quick-login flag keep receiving the catalog in the
+login response.
 
 | Setting | Relay environment | Default | Validation |
 | --- | --- | --- | --- |

@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.2.7.0",
-        "changelog": "Relay 1.2.7: any connected device can stop the shared party; stopping preserves the current playback owner, and handoffs allow slower destinations more time to prepare and confirm playback.",
+        "version": "1.2.8.0",
+        "changelog": "Relay 1.2.8: updated clients can opt into quick Jellyfin authentication and scan the catalog separately; legacy clients retain full catalog responses. Playback handoffs and global Party stop remain supported.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/VW-Doktorwhom-VW/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "D7D9833D6DB72DFBDB4EAED6A25FBB4D",
-        "timestamp": "2026-10-28T01:45:08Z"
+        "checksum": "4bc15f1191a4d86466a32092711ce827",
+        "timestamp": "2026-10-28T12:02:53Z"
       }
     ]
   }
