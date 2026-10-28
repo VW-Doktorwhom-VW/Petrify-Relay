@@ -463,7 +463,7 @@ function broadcast(data, only) {
 // (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
 // Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
 //   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
-const RELAY_VERSION = "1.2.6";
+const RELAY_VERSION = "1.2.7";
 const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 1000));
 // A new track needs a fresh stream on every member, so track changes get a longer runway.
 const PARTY_TRACK_LEAD_MS = Math.max(800, Number(process.env.PETRIFY_PARTY_TRACK_LEAD_MS || 2200));
@@ -1103,8 +1103,8 @@ function partyAction(body, zoneAuthorized = false) {
     return true;
   }
   if (action === "stop") {
-    if (!devices.has(requester)) return false;
-    // Freeze the shared timeline: the host carries on from exactly here, everyone else stops.
+    if (!party.on || !devices.has(requester)) return false;
+    // Freeze the shared timeline: the current playback owner carries on from exactly here.
     const wasPlaying = party.playing;
     party.anchorPos = partyPosition(now);
     party.anchorAt = now;
@@ -1112,16 +1112,24 @@ function partyAction(body, zoneAuthorized = false) {
     partyInvites.clear();
     party.playing = wasPlaying;
     clearTimeout(partyTimer);
-    // Sent after the "party off" broadcast, so followers no longer treat it as a stray party STOP.
-    const host = party.host;
+    const playbackOwner = activeId && devices.has(activeId) ? activeId : party.host;
+    if (playbackOwner) party.host = playbackOwner;
     const members = party.members.slice();
     setTimeout(() => {
-      for (const id of devices.keys()) if (id !== host && (!members.length || members.includes(id))) stopDevice(id);
+      const pendingSources = new Set([...pendingTransfers.values()].map((pending) => pending.sourceId).filter(Boolean));
+      for (const id of devices.keys()) {
+        if (id !== playbackOwner && !pendingSources.has(id) && (!members.length || members.includes(id))) stopDevice(id);
+      }
     }, 300);
-    if (party.host && devices.has(party.host)) {
-      activeId = party.host;
+    if (playbackOwner && devices.has(playbackOwner)) {
+      activeId = playbackOwner;
       activeTrackId = party.trackId;
-      savePlaybackState(party.host, { playing: wasPlaying, position: party.anchorPos, duration: Number(partyTrack()?.secs || 0) });
+      savePlaybackState(playbackOwner, {
+        ...(currentPlaybackState(playbackOwner) || {}),
+        playing: wasPlaying,
+        position: party.anchorPos,
+        duration: Number(partyTrack()?.secs || 0),
+      });
     }
     return true;
   }
@@ -1229,7 +1237,7 @@ function playOn(target, body) {
       sourceTrackId,
       sourceState,
       targetId: target,
-      timer: setTimeout(() => restoreTransferSource(transferId, "Destination did not confirm playback in time."), 15_000),
+      timer: setTimeout(() => restoreTransferSource(transferId, "Destination did not confirm playback in time."), 60_000),
     };
     pending.timer.unref?.();
     pendingTransfers.set(transferId, pending);
@@ -1507,7 +1515,7 @@ async function onPost(req, res, url) {
     }
     const action = String(body.action || "");
     const mutation = ["vote", "remove", "reorder", "play-now", "suggest"].includes(action);
-    const partyActionNeedsFeedback = ["reaction", "voter-opt-in", "voter-opt-out", "join", "leave"].includes(action);
+    const partyActionNeedsFeedback = ["reaction", "voter-opt-in", "voter-opt-out", "join", "leave", "stop"].includes(action);
     if (!changed && (mutation || partyActionNeedsFeedback)) {
       const requester = String(body.deviceId || "");
       const hostOnly = ["remove", "reorder", "play-now"].includes(String(body.action || ""));
@@ -1517,6 +1525,10 @@ async function onPost(req, res, url) {
           : !devices.has(requester)
             ? "Connect this device to the same Petrify service before sending reactions."
             : "That reaction or target zone is not available."
+        : action === "stop" && !devices.has(requester)
+          ? "Connect this device to the current Petrify service before stopping Party mode."
+        : action === "stop"
+          ? "Party mode is already off."
         : ["voter-opt-in", "voter-opt-out"].includes(action) && !devices.has(requester)
           ? "Connect this device to the same Petrify service before changing voting."
           : !party.on && action !== "start"

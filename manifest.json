@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.2.6.0",
-        "changelog": "Relay 1.2.6: adds playback protocol 8 for acknowledged cross-device handoffs, fresh source playback snapshots and reliable source stopping; retains queue voting, management, independent voting, party reactions and relay health diagnostics.",
+        "version": "1.2.7.0",
+        "changelog": "Relay 1.2.7: any connected device can stop the shared party; stopping preserves the current playback owner, and handoffs allow slower destinations more time to prepare and confirm playback.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/VW-Doktorwhom-VW/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "6E110C4A1775A58815381C0AA530C875",
-        "timestamp": "2026-10-28T00:58:00Z"
+        "checksum": "D7D9833D6DB72DFBDB4EAED6A25FBB4D",
+        "timestamp": "2026-10-28T01:45:08Z"
       }
     ]
   }
