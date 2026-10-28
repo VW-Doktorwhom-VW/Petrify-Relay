@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "1.2.4.0",
-        "changelog": "Relay 1.2.4: republishes the current voting and reaction-enabled relay so installations can update from legacy 1.0.7 builds; health reports voting, queue management, independent voting and reaction capabilities, and plugin settings identify outdated or incorrectly routed relay URLs.",
+        "version": "1.2.6.0",
+        "changelog": "Relay 1.2.6: adds playback protocol 8 for acknowledged cross-device handoffs, fresh source playback snapshots and reliable source stopping; retains queue voting, management, independent voting, party reactions and relay health diagnostics.",
         "targetAbi": "10.10.0.0",
         "sourceUrl": "https://raw.githubusercontent.com/VW-Doktorwhom-VW/Petrify-Relay/main/build/Petrify.zip",
-        "checksum": "4307F0CF59997E91C9BF4F3B3676CE7D",
-        "timestamp": "2026-10-27T23:00:00Z"
+        "checksum": "6E110C4A1775A58815381C0AA530C875",
+        "timestamp": "2026-10-28T00:58:00Z"
       }
     ]
   }

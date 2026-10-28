@@ -158,10 +158,10 @@ function setTransferState(transferId, status, details = {}) {
   broadcast(room({ type: "TRANSFER_STATUS", id: seq++, transfer: entry }));
 }
 
-function stopDevice(deviceId) {
+function stopDevice(deviceId, transferId = "") {
   const device = devices.get(deviceId);
-  if (!device || party.on) return;
-  const stop = { type: "STOP", id: seq++, to: deviceId };
+  if (!device || (party.on && !transferId)) return;
+  const stop = { type: "STOP", id: seq++, to: deviceId, transferId };
   for (const sock of device.res) writeSse(sock, room(stop));
   const state = playbackState.get(deviceId);
   if (state) savePlaybackState(deviceId, { ...currentPlaybackState(deviceId), playing: false });
@@ -172,7 +172,7 @@ function restoreTransferSource(transferId, reason) {
   if (!pending) return;
   clearTimeout(pending.timer);
   pendingTransfers.delete(transferId);
-  stopDevice(pending.targetId);
+  stopDevice(pending.targetId, transferId);
   savePlaybackState(pending.targetId, {
     ...(currentPlaybackState(pending.targetId) || { position: 0, duration: 0 }),
     playing: false,
@@ -463,7 +463,7 @@ function broadcast(data, only) {
 // (PARTY_LEAD_MS) so all members can buffer, park on that exact frame, and start together.
 // Clients map server time to their own clock with an NTP-style offset (GET /v1/time):
 //   local play time = anchorAt - clockOffset,  where clockOffset = serverClock - localClock.
-const RELAY_VERSION = "1.2.4";
+const RELAY_VERSION = "1.2.6";
 const PARTY_LEAD_MS = Math.max(300, Number(process.env.PETRIFY_PARTY_LEAD_MS || 1000));
 // A new track needs a fresh stream on every member, so track changes get a longer runway.
 const PARTY_TRACK_LEAD_MS = Math.max(800, Number(process.env.PETRIFY_PARTY_TRACK_LEAD_MS || 2200));
@@ -1044,9 +1044,10 @@ function partyAction(body, zoneAuthorized = false) {
     if (!list.includes(id)) return false;
     const remaining = list.filter((member) => member !== id);
     if (id === party.host) {
-      const eligible = party.mode === "voting"
-        ? [...devices.keys()].filter((member) => member !== id)
-        : remaining;
+      const eligible = [
+        ...remaining,
+        ...[...devices.keys()].filter((member) => member !== id && !remaining.includes(member)),
+      ];
       const successor = eligible.find((member) => devices.has(member));
       if (!successor) {
         const wasPlaying = party.playing;
@@ -1066,6 +1067,7 @@ function partyAction(body, zoneAuthorized = false) {
       }
       party.host = successor;
       if (party.mode === "voting") remaining.splice(0, remaining.length, successor);
+      else if (!remaining.includes(successor)) remaining.push(successor);
     }
     party.members = cleanMembers(remaining, party.host);
     party.roles = { ...(party.roles || {}), [id]: "GUEST", [party.host]: "HOST" };
@@ -1207,7 +1209,7 @@ function playOn(target, body) {
   activeTrackId = command.trackId;
   playbackSnapshots.set(target, snapshot);
   savePlaybackState(target, {
-    playing: true,
+    playing: !transferId,
     position: command.position,
     duration: Number(body.duration) || 0,
   });
@@ -1580,7 +1582,7 @@ async function onPost(req, res, url) {
       }
       clearTimeout(pending.timer);
       pendingTransfers.delete(transferId);
-      if (pending.sourceId && pending.sourceId !== targetId) stopDevice(pending.sourceId);
+      if (pending.sourceId && pending.sourceId !== targetId) stopDevice(pending.sourceId, transferId);
       activeId = targetId;
       activeTrackId = state.trackId || activeTrackId;
       const targetState = playbackState.get(targetId) || { playing: true, position: 0, duration: 0 };
@@ -1808,7 +1810,7 @@ const server = createServer((req, res) => {
     return;
   }
   if (req.method === "GET" && url.pathname === "/v1/health") {
-    sendJson(res, 200, { ok: true, service: "petrify", version: RELAY_VERSION, connectProtocol: 7, capabilities: ["queue-voting", "queue-management", "independent-voting", "party-reactions"], party: party.on, devices: listDevices() });
+    sendJson(res, 200, { ok: true, service: "petrify", version: RELAY_VERSION, connectProtocol: 8, capabilities: ["queue-voting", "queue-management", "independent-voting", "party-reactions"], party: party.on, devices: listDevices() });
     return;
   }
   const guestPage = /^\/party\/([a-f0-9]{24})$/.exec(url.pathname);
